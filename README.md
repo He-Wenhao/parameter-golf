@@ -77,11 +77,13 @@ We'd love to see weird & creative ideas in the challenge, since you never know w
 
 ## Getting Started
 
+- **Apple Silicon (Mac):** use MLX and `train_gpt_mlx.py` below.
+- **Linux with an NVIDIA GPU (e.g. Ubuntu):** use PyTorch + CUDA and `train_gpt.py` in [Training Your First Model (Linux with NVIDIA GPU)](#training-your-first-model-linux-with-nvidia-gpu). This matches the same workflow as a remote GPU box.
+- **No CUDA-capable GPU:** `train_gpt.py` requires CUDA; rent a GPU or follow [Scaling Up to a Remote Machine](#scaling-up-to-a-remote-machine).
+
 ### Training Your First Model (Mac with Apple Silicon)
 
 If you have an Apple laptop or desktop with Apple Silicon, we've set up a simple MLX training script to help you start iterating locally.
-
-If you don't have a Mac with Apple Silicon, you can run an adapted version of this script without MLX support. Just ask [Codex](https://openai.com/codex/) to refactor it; the change is straightforward. It may still be fairly slow, so we recommend jumping straight to cloud GPUs with Runpod.
 
 First, clone the repository, create a fresh Python environment, and install the packages needed for the MLX path plus dataset download:
 
@@ -116,9 +118,45 @@ python3 train_gpt_mlx.py
 
 Validation always runs on the full `fineweb_val_*` split, which is the fixed first-50k-document set. The smoke command above skips periodic validation and just prints the final `val_loss` and `val_bpb` once at the end.
 
+### Training Your First Model (Linux with NVIDIA GPU)
+
+On Ubuntu or another Linux distribution with NVIDIA drivers, use the CUDA training script `train_gpt.py` (not MLX). The script calls `torch.cuda` and **requires a CUDA-capable GPU**; CPU-only training is not supported out of the box.
+
+Clone the repository and create a virtual environment, then install **PyTorch with CUDA** using the commands from [pytorch.org/get-started/locally](https://pytorch.org/get-started/locally/) (a generic `pip install torch` often pulls a CPU-only wheel and will fail at startup with `CUDA is required`). Finally install the rest of the dependencies:
+
+```bash
+git clone https://github.com/openai/parameter-golf.git
+cd parameter-golf
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+# Install PyTorch with CUDA (see https://pytorch.org/get-started/locally/), then:
+pip install -r requirements.txt
+```
+
+Download our cached version of FineWeb with the 1024-token vocabulary (same layout as the MLX path):
+
+```bash
+python3 data/cached_challenge_fineweb.py --variant sp1024 --train-shards 10
+```
+
+This populates `./data/datasets/fineweb10B_sp1024/` and `./data/tokenizers/`. For a smaller local smoke subset, pass `--train-shards 1`.
+
+Launch training on a single GPU:
+
+```bash
+RUN_ID=baseline_sp1024 \
+DATA_PATH=./data/datasets/fineweb10B_sp1024/ \
+TOKENIZER_PATH=./data/tokenizers/fineweb_1024_bpe.model \
+VOCAB_SIZE=1024 \
+torchrun --standalone --nproc_per_node=1 train_gpt.py
+```
+
+By default, `train_gpt.py` keeps its ~10 minute wallclock cap. Override with `MAX_WALLCLOCK_SECONDS=0` for a longer run. Set `VAL_LOSS_EVERY=200` for periodic validation during training; omit it to only see final `val_loss` / `val_bpb` (validation still uses the full fixed `fineweb_val_*` split).
+
 ### Scaling Up to a Remote Machine
 
-Once you're happy with your local tests, or you want more compute, switch to a remote CUDA machine.
+Once you're happy with your local tests (Mac with MLX or Linux with CUDA), or you want more compute, switch to a remote CUDA machine.
 
 You can rent GPUs from anywhere, but OpenAI is partnering with Runpod to make setup as easy as possible.  
 
@@ -162,7 +200,7 @@ By default, this command prints `train_loss` step logs during training and print
 
 For dataset export, tokenizer export, and docs-cache rebuild instructions, see [data/README.md](data/README.md).
 
-Evaluation will be in the RunPod environment with all packages installed. `requirements.txt` is provided as a reference if you want to self-setup.
+Evaluation will be in the RunPod environment with all packages installed. `requirements.txt` is the same dependency set you can use to self-setup on your own Linux machine (after installing PyTorch with CUDA as above).
 
 ## FAQ
 
