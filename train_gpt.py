@@ -57,9 +57,10 @@ class Hyperparameters:
     mask_id = vocab_size  # 1024
     total_vocab = vocab_size + 1  # 1025
     padded_vocab = int(os.environ.get("PADDED_VOCAB", 1088))  # multiple of 64 for efficiency
-    num_layers = int(os.environ.get("NUM_LAYERS", 8))
+    num_layers = int(os.environ.get("NUM_LAYERS", 9))
     model_dim = int(os.environ.get("MODEL_DIM", 512))
     num_heads = int(os.environ.get("NUM_HEADS", 8))
+    num_kv_groups = int(os.environ.get("NUM_KV_GROUPS", 2))
     mlp_mult = float(os.environ.get("MLP_MULT", 2.0))
     cond_dim = int(os.environ.get("COND_DIM", 64))
     rope_base = float(os.environ.get("ROPE_BASE", 10000.0))
@@ -481,32 +482,39 @@ class AdaLN(nn.Module):
 
 
 class BidirectionalAttention(nn.Module):
-    def __init__(self, dim: int, num_heads: int):
+    def __init__(self, dim: int, num_heads: int, num_kv_groups: int = 0):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
+        self.num_kv_heads = num_kv_groups if num_kv_groups > 0 else num_heads
+        self.kv_dim = self.num_kv_heads * self.head_dim
         self.c_q = nn.Linear(dim, dim, bias=False)
-        self.c_k = nn.Linear(dim, dim, bias=False)
-        self.c_v = nn.Linear(dim, dim, bias=False)
+        self.c_k = nn.Linear(dim, self.kv_dim, bias=False)
+        self.c_v = nn.Linear(dim, self.kv_dim, bias=False)
         self.c_proj = nn.Linear(dim, dim, bias=False)
 
     def forward(self, x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
         B, T, _ = x.shape
         q = self.c_q(x).reshape(B, T, self.num_heads, self.head_dim).transpose(1, 2)
-        k = self.c_k(x).reshape(B, T, self.num_heads, self.head_dim).transpose(1, 2)
-        v = self.c_v(x).reshape(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+        k = self.c_k(x).reshape(B, T, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        v = self.c_v(x).reshape(B, T, self.num_kv_heads, self.head_dim).transpose(1, 2)
         q = rms_norm(q)
         k = rms_norm(k)
         q = apply_rotary_emb(q, cos, sin)
         k = apply_rotary_emb(k, cos, sin)
+        # Expand KV for GQA
+        if self.num_kv_heads < self.num_heads:
+            rep = self.num_heads // self.num_kv_heads
+            k = k.repeat_interleave(rep, dim=1)
+            v = v.repeat_interleave(rep, dim=1)
         y = F.scaled_dot_product_attention(q, k, v, is_causal=False)
         return self.c_proj(y.transpose(1, 2).contiguous().reshape(B, T, -1))
 
 
 class Block(nn.Module):
-    def __init__(self, dim: int, num_heads: int, mlp_mult: float, cond_dim: int):
+    def __init__(self, dim: int, num_heads: int, mlp_mult: float, cond_dim: int, num_kv_groups: int = 0):
         super().__init__()
-        self.attn = BidirectionalAttention(dim, num_heads)
+        self.attn = BidirectionalAttention(dim, num_heads, num_kv_groups)
         self.adaln_attn = AdaLN(dim, cond_dim)
         self.adaln_mlp = AdaLN(dim, cond_dim)
         hidden = int(dim * mlp_mult)
@@ -528,7 +536,7 @@ class DiffusionLM(nn.Module):
         self.wte = nn.Embedding(args.padded_vocab, dim)
         self.sigma_map = TimestepEmbedder(args.cond_dim)
         self.blocks = nn.ModuleList([
-            Block(dim, args.num_heads, args.mlp_mult, args.cond_dim)
+            Block(dim, args.num_heads, args.mlp_mult, args.cond_dim, args.num_kv_groups)
             for _ in range(args.num_layers)
         ])
         self.head = nn.Linear(dim, args.padded_vocab, bias=False)
