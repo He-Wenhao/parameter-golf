@@ -46,7 +46,7 @@ class Hyperparameters:
     # Training length.
     iterations = int(os.environ.get("ITERATIONS", 20000))
     warmup_steps = int(os.environ.get("WARMUP_STEPS", 200))
-    warmdown_iters = int(os.environ.get("WARMDOWN_ITERS", 1500))
+    warmdown_iters = int(os.environ.get("WARMDOWN_ITERS", 1000))
     train_seq_len = int(os.environ.get("TRAIN_SEQ_LEN", 1024))
     batch_size_per_gpu = int(os.environ.get("BATCH_SIZE_PER_GPU", 64))
     grad_accum_steps = int(os.environ.get("GRAD_ACCUM_STEPS", 1))
@@ -65,14 +65,14 @@ class Hyperparameters:
     rope_base = float(os.environ.get("ROPE_BASE", 10000.0))
 
     # Optimizer hyperparameters.
-    lr = float(os.environ.get("LR", 2e-3))
+    lr = float(os.environ.get("LR", 1e-3))
     weight_decay = float(os.environ.get("WEIGHT_DECAY", 0.1))
     beta1 = float(os.environ.get("BETA1", 0.9))
     beta2 = float(os.environ.get("BETA2", 0.95))
     grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 1.0))
 
     # Diffusion hyperparameters.
-    noise_eps = float(os.environ.get("NOISE_EPS", 1e-3))
+    noise_eps = float(os.environ.get("NOISE_EPS", 0.1))
 
     # Eval hyperparameters.
     elbo_eval_steps = int(os.environ.get("ELBO_EVAL_STEPS", 128))
@@ -588,7 +588,7 @@ def mdlm_loss(model: nn.Module, x0: Tensor, args: Hyperparameters) -> Tensor:
     NELBO = integral_0^sigma_max f(sigma) dsigma = sigma_max * E[f(sigma)].
     """
     B, L = x0.shape
-    sigma_max = -math.log(args.noise_eps)  # ≈ 6.9
+    sigma_max = -math.log(args.noise_eps)  # ≈ 2.3 for eps=0.1
 
     # Antithetic uniform sigma sampling
     sigma = torch.rand(B // 2 + 1, device=x0.device) * sigma_max
