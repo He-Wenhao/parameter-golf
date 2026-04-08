@@ -47,8 +47,8 @@ class Hyperparameters:
     iterations = int(os.environ.get("ITERATIONS", 20000))
     warmup_steps = int(os.environ.get("WARMUP_STEPS", 300))
     warmdown_iters = int(os.environ.get("WARMDOWN_ITERS", 500))
-    train_seq_len = int(os.environ.get("TRAIN_SEQ_LEN", 2048))
-    batch_size_per_gpu = int(os.environ.get("BATCH_SIZE_PER_GPU", 32))
+    train_seq_len = int(os.environ.get("TRAIN_SEQ_LEN", 1024))
+    batch_size_per_gpu = int(os.environ.get("BATCH_SIZE_PER_GPU", 64))
     grad_accum_steps = int(os.environ.get("GRAD_ACCUM_STEPS", 1))
     max_wallclock_seconds = float(os.environ.get("MAX_WALLCLOCK_SECONDS", 600.0))
 
@@ -583,15 +583,18 @@ class DiffusionLM(nn.Module):
 # -----------------------------
 
 def mdlm_loss(model: nn.Module, x0: Tensor, args: Hyperparameters) -> Tensor:
-    """Continuous-time NELBO loss for MDLM (Eq. 14 from Sahoo et al.).
-    model can be DDP-wrapped or raw DiffusionLM — calls model(xt, sigma) which goes through DDP.forward().
+    """Continuous-time NELBO loss for MDLM with importance sampling.
+    Sample sigma ~ Uniform(0, sigma_max) to eliminate dsigma variance.
+    NELBO = integral_0^sigma_max f(sigma) dsigma = sigma_max * E[f(sigma)].
     """
     B, L = x0.shape
-    # Antithetic sampling for lower variance
-    t = torch.rand(B // 2 + 1, device=x0.device)
-    t = torch.cat([t, 1 - t])[:B].clamp(1e-5, 1 - 1e-5)
+    sigma_max = -math.log(args.noise_eps)  # ≈ 6.9
 
-    sigma, alpha = log_linear_noise(t, eps=args.noise_eps)
+    # Antithetic uniform sigma sampling
+    sigma = torch.rand(B // 2 + 1, device=x0.device) * sigma_max
+    sigma = torch.cat([sigma, sigma_max - sigma])[:B]
+
+    alpha = torch.exp(-sigma)
     move_chance = 1 - alpha
 
     # Mask tokens independently
@@ -603,11 +606,9 @@ def mdlm_loss(model: nn.Module, x0: Tensor, args: Hyperparameters) -> Tensor:
     log_probs = model(xt, sigma)  # Goes through DDP wrapper for gradient sync
     log_p_x0 = torch.gather(log_probs, -1, x0[..., None]).squeeze(-1)
 
-    # dsigma/dt = (1-eps) / alpha for log-linear schedule
-    dsigma = (1 - args.noise_eps) / alpha
-
+    # No dsigma reweighting needed — absorbed by uniform sigma sampling
     is_masked = (xt == args.mask_id).float()
-    loss = (dsigma[:, None] * (-log_p_x0) * is_masked).sum() / (B * L)
+    loss = sigma_max * ((-log_p_x0) * is_masked).sum() / (B * L)
     return loss
 
 
