@@ -87,7 +87,7 @@ class Hyperparameters:
     grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.3))
     muon_weight_decay = float(os.environ.get("MUON_WEIGHT_DECAY", 0.04))
     adam_weight_decay = float(os.environ.get("ADAM_WEIGHT_DECAY", 0.04))
-    eval_stride = int(os.environ.get("EVAL_STRIDE", 256))
+    eval_stride = int(os.environ.get("EVAL_STRIDE", 128))
 
 # -----------------------------
 # MUON OPTIMIZER 
