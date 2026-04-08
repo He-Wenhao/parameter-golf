@@ -57,7 +57,7 @@ class Hyperparameters:
     mask_id = vocab_size  # 1024
     total_vocab = vocab_size + 1  # 1025
     padded_vocab = int(os.environ.get("PADDED_VOCAB", 1088))  # multiple of 64 for efficiency
-    num_layers = int(os.environ.get("NUM_LAYERS", 10))
+    num_layers = int(os.environ.get("NUM_LAYERS", 8))
     model_dim = int(os.environ.get("MODEL_DIM", 512))
     num_heads = int(os.environ.get("NUM_HEADS", 8))
     mlp_mult = float(os.environ.get("MLP_MULT", 2.0))
