@@ -65,7 +65,7 @@ class Hyperparameters:
     rope_base = float(os.environ.get("ROPE_BASE", 10000.0))
 
     # Optimizer hyperparameters.
-    lr = float(os.environ.get("LR", 1.5e-3))
+    lr = float(os.environ.get("LR", 1.2e-3))
     weight_decay = float(os.environ.get("WEIGHT_DECAY", 0.1))
     beta1 = float(os.environ.get("BETA1", 0.9))
     beta2 = float(os.environ.get("BETA2", 0.95))
