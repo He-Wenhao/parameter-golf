@@ -48,8 +48,8 @@ class Hyperparameters:
     warmup_steps = int(os.environ.get("WARMUP_STEPS", 300))
     warmdown_iters = int(os.environ.get("WARMDOWN_ITERS", 500))
     train_seq_len = int(os.environ.get("TRAIN_SEQ_LEN", 2048))
-    batch_size_per_gpu = int(os.environ.get("BATCH_SIZE_PER_GPU", 8))
-    grad_accum_steps = int(os.environ.get("GRAD_ACCUM_STEPS", 4))
+    batch_size_per_gpu = int(os.environ.get("BATCH_SIZE_PER_GPU", 32))
+    grad_accum_steps = int(os.environ.get("GRAD_ACCUM_STEPS", 1))
     max_wallclock_seconds = float(os.environ.get("MAX_WALLCLOCK_SECONDS", 600.0))
 
     # Model shape.
@@ -57,15 +57,15 @@ class Hyperparameters:
     mask_id = vocab_size  # 1024
     total_vocab = vocab_size + 1  # 1025
     padded_vocab = int(os.environ.get("PADDED_VOCAB", 1088))  # multiple of 64 for efficiency
-    num_layers = int(os.environ.get("NUM_LAYERS", 11))
+    num_layers = int(os.environ.get("NUM_LAYERS", 10))
     model_dim = int(os.environ.get("MODEL_DIM", 512))
     num_heads = int(os.environ.get("NUM_HEADS", 8))
     mlp_mult = float(os.environ.get("MLP_MULT", 2.0))
-    cond_dim = int(os.environ.get("COND_DIM", 128))
+    cond_dim = int(os.environ.get("COND_DIM", 64))
     rope_base = float(os.environ.get("ROPE_BASE", 10000.0))
 
     # Optimizer hyperparameters.
-    lr = float(os.environ.get("LR", 6e-4))
+    lr = float(os.environ.get("LR", 1e-3))
     weight_decay = float(os.environ.get("WEIGHT_DECAY", 0.1))
     beta1 = float(os.environ.get("BETA1", 0.9))
     beta2 = float(os.environ.get("BETA2", 0.95))
