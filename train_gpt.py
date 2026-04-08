@@ -57,10 +57,10 @@ class Hyperparameters:
     mask_id = vocab_size  # 1024
     total_vocab = vocab_size + 1  # 1025
     padded_vocab = int(os.environ.get("PADDED_VOCAB", 1088))  # multiple of 64 for efficiency
-    num_layers = int(os.environ.get("NUM_LAYERS", 8))
+    num_layers = int(os.environ.get("NUM_LAYERS", 9))
     model_dim = int(os.environ.get("MODEL_DIM", 512))
     num_heads = int(os.environ.get("NUM_HEADS", 8))
-    num_kv_groups = int(os.environ.get("NUM_KV_GROUPS", 0))  # 0 = full MHA
+    num_kv_groups = int(os.environ.get("NUM_KV_GROUPS", 2))
     mlp_mult = float(os.environ.get("MLP_MULT", 2.0))
     cond_dim = int(os.environ.get("COND_DIM", 64))
     rope_base = float(os.environ.get("ROPE_BASE", 10000.0))
@@ -224,12 +224,7 @@ def eval_elbo_bpb(
 
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                     unwrapped = model.module if hasattr(model, 'module') else model
-                    # Self-conditioning: first pass with zeros, then use prediction
-                    sc_emb = torch.zeros(bsz, seq_len, args.model_dim, device=device, dtype=unwrapped.wte.weight.dtype)
-                    logits_sc = unwrapped.forward_logits(xt, sigma_curr, sc_emb)
-                    x0_hat = logits_sc[..., :args.vocab_size].argmax(dim=-1)
-                    sc_emb = unwrapped.wte(x0_hat)
-                    log_probs = unwrapped.subs_log_probs(xt, sigma_curr, sc_emb)
+                    log_probs = unwrapped.subs_log_probs(xt, sigma_curr)
 
                 log_p_x0 = torch.gather(log_probs.float(), -1, x0[..., None]).squeeze(-1)
 
@@ -562,10 +557,10 @@ class DiffusionLM(nn.Module):
             elif isinstance(module, nn.Embedding):
                 nn.init.normal_(module.weight, std=0.02)
 
-    def forward_logits(self, xt: Tensor, sigma: Tensor, sc_emb: Tensor) -> Tensor:
+    def forward_logits(self, xt: Tensor, sigma: Tensor) -> Tensor:
         """Raw logits for masked input xt at noise level sigma."""
         B, T = xt.shape
-        x = self.wte(xt) + sc_emb
+        x = self.wte(xt)
         c = F.silu(self.sigma_map(sigma)).to(dtype=x.dtype)
         cos = self.rope_cos[:, :, :T].to(dtype=x.dtype)
         sin = self.rope_sin[:, :, :T].to(dtype=x.dtype)
@@ -574,9 +569,9 @@ class DiffusionLM(nn.Module):
         logits = self.head(rms_norm(x))[..., :self.args.total_vocab].float()
         return logits
 
-    def subs_log_probs(self, xt: Tensor, sigma: Tensor, sc_emb: Tensor) -> Tensor:
+    def subs_log_probs(self, xt: Tensor, sigma: Tensor) -> Tensor:
         """MDLM substitution log probs with frozen visible tokens."""
-        logits = self.forward_logits(xt, sigma, sc_emb)
+        logits = self.forward_logits(xt, sigma)
         # Can't predict MASK token
         logits[:, :, self.args.mask_id] = -1e6
         logits = logits - torch.logsumexp(logits, dim=-1, keepdim=True)
@@ -586,9 +581,9 @@ class DiffusionLM(nn.Module):
         visible = (xt != self.args.mask_id)[..., None]
         return torch.where(visible, frozen, logits)
 
-    def forward(self, xt: Tensor, sigma: Tensor, sc_emb: Tensor) -> Tensor:
+    def forward(self, xt: Tensor, sigma: Tensor) -> Tensor:
         """Forward pass (calls subs_log_probs). Use this for DDP compatibility."""
-        return self.subs_log_probs(xt, sigma, sc_emb)
+        return self.subs_log_probs(xt, sigma)
 
 
 # -----------------------------
@@ -596,12 +591,12 @@ class DiffusionLM(nn.Module):
 # -----------------------------
 
 def mdlm_loss(model: nn.Module, x0: Tensor, args: Hyperparameters) -> Tensor:
-    """Continuous-time NELBO loss for MDLM with importance sampling + self-conditioning.
+    """Continuous-time NELBO loss for MDLM with importance sampling.
     Sample sigma ~ Uniform(0, sigma_max) to eliminate dsigma variance.
     NELBO = integral_0^sigma_max f(sigma) dsigma = sigma_max * E[f(sigma)].
     """
     B, L = x0.shape
-    sigma_max = -math.log(args.noise_eps)
+    sigma_max = -math.log(args.noise_eps)  # ≈ 2.3 for eps=0.1
 
     # Antithetic uniform sigma sampling
     sigma = torch.rand(B // 2 + 1, device=x0.device) * sigma_max
@@ -616,16 +611,7 @@ def mdlm_loss(model: nn.Module, x0: Tensor, args: Hyperparameters) -> Tensor:
         args.mask_id, x0,
     )
 
-    # Self-conditioning: 50% of the time, get x0_hat from a no-grad pass first
-    unwrapped = model.module if hasattr(model, 'module') else model
-    sc_emb = torch.zeros(B, L, args.model_dim, device=x0.device, dtype=unwrapped.wte.weight.dtype)
-    if random.random() < 0.5:
-        with torch.no_grad():
-            logits = unwrapped.forward_logits(xt, sigma, sc_emb)
-            x0_hat = logits[..., :args.vocab_size].argmax(dim=-1)
-            sc_emb = unwrapped.wte(x0_hat).detach()
-
-    log_probs = model(xt, sigma, sc_emb)  # Goes through DDP wrapper for gradient sync
+    log_probs = model(xt, sigma)  # Goes through DDP wrapper for gradient sync
     log_p_x0 = torch.gather(log_probs, -1, x0[..., None]).squeeze(-1)
 
     # No dsigma reweighting needed — absorbed by uniform sigma sampling
