@@ -40,13 +40,13 @@ class Hyperparameters:
     run_id = os.environ.get("RUN_ID", str(uuid.uuid4()))
     seed = int(os.environ.get("SEED", 1337))
 
-    val_loss_every = int(os.environ.get("VAL_LOSS_EVERY", 1000))
+    val_loss_every = int(os.environ.get("VAL_LOSS_EVERY", 500))
     train_log_every = int(os.environ.get("TRAIN_LOG_EVERY", 100))
 
     # Training length.
     iterations = int(os.environ.get("ITERATIONS", 20000))
     warmup_steps = int(os.environ.get("WARMUP_STEPS", 300))
-    warmdown_iters = int(os.environ.get("WARMDOWN_ITERS", 1500))
+    warmdown_iters = int(os.environ.get("WARMDOWN_ITERS", 500))
     train_seq_len = int(os.environ.get("TRAIN_SEQ_LEN", 2048))
     batch_size_per_gpu = int(os.environ.get("BATCH_SIZE_PER_GPU", 8))
     grad_accum_steps = int(os.environ.get("GRAD_ACCUM_STEPS", 4))
@@ -60,7 +60,7 @@ class Hyperparameters:
     num_layers = int(os.environ.get("NUM_LAYERS", 11))
     model_dim = int(os.environ.get("MODEL_DIM", 512))
     num_heads = int(os.environ.get("NUM_HEADS", 8))
-    mlp_mult = float(os.environ.get("MLP_MULT", 3.0))
+    mlp_mult = float(os.environ.get("MLP_MULT", 2.0))
     cond_dim = int(os.environ.get("COND_DIM", 128))
     rope_base = float(os.environ.get("ROPE_BASE", 10000.0))
 
@@ -75,7 +75,8 @@ class Hyperparameters:
     noise_eps = float(os.environ.get("NOISE_EPS", 1e-3))
 
     # Eval hyperparameters.
-    elbo_eval_steps = int(os.environ.get("ELBO_EVAL_STEPS", 256))
+    elbo_eval_steps = int(os.environ.get("ELBO_EVAL_STEPS", 128))
+    max_eval_seqs = int(os.environ.get("MAX_EVAL_SEQS", 256))
 
 
 # -----------------------------
@@ -169,7 +170,7 @@ def eval_elbo_bpb(
     """Discrete absorbing-mask ELBO evaluation. Returns (val_loss_nats, val_bpb)."""
     seq_len = args.train_seq_len
     n_steps = args.elbo_eval_steps
-    total_seqs = val_tokens.numel() // seq_len
+    total_seqs = min(val_tokens.numel() // seq_len, args.max_eval_seqs)
     seq_start = (total_seqs * rank) // world_size
     seq_end = (total_seqs * (rank + 1)) // world_size
 
@@ -676,6 +677,7 @@ def main() -> None:
             if param.ndim < 2 or "adaln" in name or "sigma_map" in name:
                 param.data = param.data.float()
 
+    base_model = torch.compile(base_model)
     model = DDP(base_model, device_ids=[local_rank], broadcast_buffers=False) if distributed else base_model
 
     n_params = sum(p.numel() for p in base_model.parameters())
@@ -716,6 +718,7 @@ def main() -> None:
     # Training loop
     training_time_ms = 0.0
     stop_after_step: int | None = None
+    ema_loss = 0.0
     torch.cuda.synchronize()
     t0 = time.perf_counter()
 
@@ -768,11 +771,13 @@ def main() -> None:
         optimizer.step()
 
         step += 1
+        tl = train_loss.item()
+        ema_loss = tl if step == 1 else 0.95 * ema_loss + 0.05 * tl
         approx_training_time_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
         should_log = args.train_log_every > 0 and (step <= 10 or step % args.train_log_every == 0)
         if should_log:
             log0(
-                f"step:{step}/{args.iterations} train_loss:{train_loss.item():.4f} lr:{lr:.1e} "
+                f"step:{step}/{args.iterations} train_loss:{tl:.4f} ema_loss:{ema_loss:.4f} lr:{lr:.1e} "
                 f"train_time:{approx_training_time_ms:.0f}ms step_avg:{approx_training_time_ms / step:.2f}ms"
             )
 
