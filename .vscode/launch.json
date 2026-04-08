@@ -1,0 +1,55 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug train_gpt (single GPU, no torchrun)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/train_gpt.py",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "env": {
+                "RUN_ID": "debug_run",
+                "DATA_PATH": "./data/datasets/fineweb10B_sp1024/",
+                "TOKENIZER_PATH": "./data/tokenizers/fineweb_1024_bpe.model",
+                "VOCAB_SIZE": "1024",
+                "WORLD_SIZE": "1",
+                "RANK": "0",
+                "LOCAL_RANK": "0",
+                "MASTER_ADDR": "127.0.0.1",
+                "MASTER_PORT": "29500"
+            }
+        },
+        {
+            "name": "Debug train_gpt (torchrun, 1 GPU)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "torch.distributed.run",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": [
+                "--standalone",
+                "--nproc_per_node=1",
+                "train_gpt.py"
+            ],
+            "env": {
+                "RUN_ID": "debug_run",
+                "DATA_PATH": "./data/datasets/fineweb10B_sp1024/",
+                "TOKENIZER_PATH": "./data/tokenizers/fineweb_1024_bpe.model",
+                "VOCAB_SIZE": "1024"
+            }
+        },
+        {
+            "name": "Attach to debugpy (for multi-GPU)",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": {
+                "host": "127.0.0.1",
+                "port": 5678
+            },
+            "justMyCode": true
+        }
+    ]
+}

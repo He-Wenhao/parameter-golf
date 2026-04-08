@@ -704,6 +704,8 @@ class GPT(nn.Module):
             ]
         )
         self.final_norm = RMSNorm()
+        # SmearGate: learned per-dim gate blending current token with previous token
+        self.smear_gate = nn.Parameter(torch.full((model_dim,), 3.0, dtype=torch.float32))
         self.lm_head = None if tie_embeddings else CastedLinear(model_dim, vocab_size, bias=False)
         if self.lm_head is not None:
             self.lm_head._zero_init = True
@@ -721,6 +723,10 @@ class GPT(nn.Module):
 
     def forward(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
         x = self.tok_emb(input_ids)
+        # SmearGate: blend each token with the previous token
+        gate = torch.sigmoid(self.smear_gate.to(dtype=x.dtype))[None, None, :]
+        prev = F.pad(x[:, :-1, :], (0, 0, 1, 0))  # shift right, zero-pad first position
+        x = gate * x + (1.0 - gate) * prev
         x = F.rms_norm(x, (x.size(-1),))
         x0 = x
         skips: list[Tensor] = []
