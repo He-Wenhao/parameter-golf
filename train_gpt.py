@@ -72,7 +72,7 @@ class Hyperparameters:
     grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 1.0))
 
     # Diffusion hyperparameters.
-    noise_eps = float(os.environ.get("NOISE_EPS", 0.1))
+    noise_eps = float(os.environ.get("NOISE_EPS", 0.01))
 
     # Eval hyperparameters.
     elbo_eval_steps = int(os.environ.get("ELBO_EVAL_STEPS", 128))
