@@ -46,9 +46,9 @@ class Hyperparameters:
     # Training length.
     iterations = int(os.environ.get("ITERATIONS", 20000))
     warmup_steps = int(os.environ.get("WARMUP_STEPS", 200))
-    warmdown_iters = int(os.environ.get("WARMDOWN_ITERS", 1200))
+    warmdown_iters = int(os.environ.get("WARMDOWN_ITERS", 1000))
     train_seq_len = int(os.environ.get("TRAIN_SEQ_LEN", 1024))
-    batch_size_per_gpu = int(os.environ.get("BATCH_SIZE_PER_GPU", 128))
+    batch_size_per_gpu = int(os.environ.get("BATCH_SIZE_PER_GPU", 64))
     grad_accum_steps = int(os.environ.get("GRAD_ACCUM_STEPS", 1))
     max_wallclock_seconds = float(os.environ.get("MAX_WALLCLOCK_SECONDS", 600.0))
 
