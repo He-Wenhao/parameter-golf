@@ -1,9 +1,13 @@
 commit	val_bpb	memory_gb	artifact_mb	status	description
-992f599	2.054	3.2	17.3	discard	MDLM v2: 11L 512d 2x cond128 lr=6e-4 (over 16MB)
-8e0b02b	1.955	10.8	19.5	discard	MDLM v3: 10L 512d 2x cond64 lr=1e-3 (over 16MB)
-d91e8db	1.924	8.8	15.9	discard	MDLM v4: 8L 512d 2x cond64 lr=1e-3 seq2048 batch32
-e1afee7	1.798	8.8	15.9	keep	MDLM v5: importance sampling + seq1024 + batch64
-d43b0c3	1.866	17.5	15.5	discard	MDLM v6: batch=128 hurt (fewer steps)
+992f599	2.054	3.2	17.3	discard	MDLM v2: 11L cond128 lr=6e-4 eps=1e-3 (over 16MB)
+8e0b02b	1.955	10.8	19.5	discard	MDLM v3: 10L cond64 lr=1e-3 eps=1e-3 (over 16MB)
+d91e8db	1.924	8.8	15.9	discard	MDLM v4: 8L cond64 seq2048 batch32 eps=1e-3
+e1afee7	1.798	8.8	15.9	discard	MDLM v5: importance sampling + seq1024 + batch64
+d43b0c3	1.866	17.5	15.5	discard	MDLM v6: batch=128 (fewer steps hurt)
 6c0e30f	1.799	8.8	15.9	discard	MDLM v7: warmdown=1000 (same as v5)
-0b8f7a2	1.772	8.8	16.7	discard	MDLM v8: lr=2e-3 (better BPB but artifact >16MB)
-9db68e4	1.788	8.8	15.7	keep	MDLM v9: noise_eps=0.1 (from PR#1106, best so far)
+0b8f7a2	1.772	8.8	16.7	discard	MDLM v8: lr=2e-3 (artifact >16MB)
+9db68e4	1.788	8.8	15.7	discard	MDLM v9: eps=0.1 (terminal KL too high)
+a18c419	1.771	8.8	15.8	discard	MDLM v10: eps=0.01 lr=1e-3
+f9d09c3	1.747	8.8	16.3	discard	MDLM v11: eps=0.01 lr=1.5e-3 (artifact >16MB)
+e485e87	1.754	8.8	16.0	discard	MDLM v12: eps=0.01 lr=1.2e-3 (artifact >16MB by 75KB)
+75a6064	1.766	8.8	15.96	keep	MDLM v13: eps=0.01 lr=1.1e-3 (best valid)
