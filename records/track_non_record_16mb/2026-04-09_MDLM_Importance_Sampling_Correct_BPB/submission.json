@@ -1,0 +1,18 @@
+{
+  "author": "Wenhao He",
+  "github_id": "He-Wenhao",
+  "name": "MDLM Diffusion — Importance Sampling + Correct BPB",
+  "blurb": "Masked Diffusion LM with uniform-sigma importance sampling (eliminates dsigma variance), AdaLN conditioning, GQA-2, int8+zlib quantization. First diffusion submission with tokenizer-agnostic BPB matching the competition evaluator.",
+  "date": "2026-04-09T17:00:00Z",
+  "val_loss": 2.98117795,
+  "val_bpb": 1.76566705,
+  "bytes_total": 15956674,
+  "bytes_code": 34710,
+  "pre_quant_val_loss": 2.9752,
+  "pre_quant_val_bpb": 1.7621,
+  "step_stop": 6372,
+  "wallclock_seconds": 600.0,
+  "eval_time_seconds": 14.27,
+  "bytes_model_int8_zlib": 15921964,
+  "hardware": "4xA100-SXM4-40GB"
+}
