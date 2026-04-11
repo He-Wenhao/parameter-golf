@@ -1,6 +1,6 @@
 # Non-Record: MDLM with Uniform Sigma Importance Sampling
 
-**val_bpb: 1.7657** (int8+zlib, 128 ELBO steps) | **19.0M params** | 4xA100-SXM4-40GB | Non-record
+**val_bpb: 1.8195** (int8+zlib, 4096-seq ELBO, 128 timesteps) | **17.7M params** | 4xA100-SXM4-40GB | Non-record
 
 ## Key Innovation: Uniform Sigma Importance Sampling
 
@@ -19,18 +19,18 @@ Combined with antithetic sampling (pairing sigma with sigma_max - sigma), this g
 
 | Metric | Value |
 |--------|-------|
-| val_bpb (int8+zlib) | **1.7657** |
-| val_bpb (pre-quant) | 1.7621 |
-| val_loss (nats/tok) | 2.9812 |
-| Steps | 6,372 (600s wallclock) |
-| Artifact | 15.96 MB |
-| Parameters | 18,989,376 |
+| val_bpb (int8+zlib, 4096 seqs) | **1.8195** |
+| val_bpb (pre-quant) | 1.7824 |
+| val_loss (nats/tok) | 3.0278 |
+| Steps | 5,954 (600s wallclock) |
+| Artifact | 16.52 MB |
+| Parameters | 17,680,704 |
 
-Note on BPB: we use the same tokenizer-agnostic 3-LUT byte counting as the AR baseline (`build_sentencepiece_luts`). Prior diffusion work (PR #1106) used a hardcoded 4.3 bytes/token approximation; the actual weighted average for SP1024 is 2.46 bytes/token.
+Note on BPB: we use the same tokenizer-agnostic 3-LUT byte counting as the AR baseline (`build_sentencepiece_luts`). The actual weighted average for SP1024 is 2.46 bytes/token.
 
 ## Architecture
 
-- 8 layers, 512 dim, 8 heads (GQA-2), 2x MLP, LeakyReLU(0.5)^2
+- 9 layers, 512 dim, 8 heads (GQA-2), 2x MLP, LeakyReLU(0.5)^2
 - AdaLN timestep conditioning (sigma -> scale/shift per layer)
 - Bidirectional attention with RoPE, no causal mask
 - SUBS parameterization with frozen visible-token logits
@@ -42,7 +42,8 @@ Note on BPB: we use the same tokenizer-agnostic 3-LUT byte counting as the AR ba
 - AdamW (lr=1.1e-3, betas=0.9/0.95, wd=0.1), grad clip=1.0
 - Wallclock-based cosine warmdown
 - 262K tokens/step (64 seqs x 4 GPUs x 1024 tokens)
-- Per-row int8 quantization + zlib-9 (0.004 BPB degradation)
+- Per-row int8 quantization + zlib-9 (0.037 BPB degradation)
+- Final eval: 4096 sequences (vs 256 during training) for robust estimate
 
 ## Sweep Summary (27 experiments)
 
@@ -55,11 +56,11 @@ Note on BPB: we use the same tokenizer-agnostic 3-LUT byte counting as the AR ba
 | seq_len 1024->2048 | -0.05 |
 | cond_dim 64->128 | +0.91 |
 
-Best config that fits 16MB: 8L 512d GQA-2, eps=0.01, importance sampling, softcap=30.
+Best config that fits 16MB: 9L 512d GQA-2, eps=0.01, importance sampling, softcap=30.
 
 ## The Diffusion-AR Gap
 
-Diffusion (1.77) vs AR (1.22) — a 0.55 BPB gap. This is expected: the discrete ELBO is an upper bound on NLL, while AR computes exact NLL. With 19M params and 6K training steps, the model cannot fully learn all noise levels. Closing this gap likely requires larger models, longer training, or tighter variational bounds.
+Diffusion (1.82) vs AR (1.22) — a 0.60 BPB gap. This is expected: the discrete ELBO is an upper bound on NLL, while AR computes exact NLL. With 17.7M params and 6K training steps, the model cannot fully learn all noise levels. Closing this gap likely requires larger models, longer training, or tighter variational bounds.
 
 ## Credits
 

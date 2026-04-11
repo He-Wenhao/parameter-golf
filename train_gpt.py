@@ -78,6 +78,7 @@ class Hyperparameters:
     # Eval hyperparameters.
     elbo_eval_steps = int(os.environ.get("ELBO_EVAL_STEPS", 128))
     max_eval_seqs = int(os.environ.get("MAX_EVAL_SEQS", 256))
+    final_eval_seqs = int(os.environ.get("FINAL_EVAL_SEQS", 4096))
 
 
 # -----------------------------
@@ -837,6 +838,10 @@ def main() -> None:
         quant_blob_disk = f.read()
     quant_state = torch.load(io.BytesIO(zlib.decompress(quant_blob_disk)), map_location="cpu")
     base_model.load_state_dict(dequantize_state_dict_int8(quant_state), strict=True)
+    # Final eval uses final_eval_seqs (larger than training eval) for robust estimate
+    saved_max_eval = args.max_eval_seqs
+    args.max_eval_seqs = args.final_eval_seqs
+    log0(f"final_eval: {args.max_eval_seqs} sequences (training used {saved_max_eval})")
     torch.cuda.synchronize()
     t_qeval = time.perf_counter()
     q_val_loss, q_val_bpb = eval_elbo_bpb(
@@ -849,6 +854,7 @@ def main() -> None:
         f"eval_time:{1000.0 * (time.perf_counter() - t_qeval):.0f}ms"
     )
     log0(f"final_int8_zlib_roundtrip_exact val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}")
+    args.max_eval_seqs = saved_max_eval
 
     if distributed:
         dist.destroy_process_group()
