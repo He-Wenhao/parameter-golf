@@ -24,3 +24,4 @@ e485e87	1.754	8.8	16.0	discard	MDLM v12: eps=0.01 lr=1.2e-3 (artifact >16MB by 7
 348535b	1.3723	9.5	15.79	discard	Run11: unet=4 muon_lr=0.05 (1.3534 pre-quant; higher quant penalty 0.019 vs 0.015; worse than Run10)
 57d2cdb	1.3699	9.5	15.79	discard	Run12: noise_eps=0.05 (1.3471 pre-quant beats #1403! but quant penalty 0.023 vs 0.015; int8 worse than Run10)
 e3e13c8	1.3694	9.5	15.80	discard	Run14b: PyTorch 2.6.0 enable_gqa=True (1.3519 pre-quant; 56.57ms/step same speed; int8 worse than Run10 due to higher quant penalty 0.0175 vs 0.0154)
+f7d21e3	1.3619	9.5	14.86	keep	Run16b: linear LR→0 + Muon WD=0.01 + EMA=0.997 + GPTQ-lite + noise_eps=0.05 + orthogonal init (1.3535 pre-quant; quant penalty 0.0084 vs 0.0154; new best!)
