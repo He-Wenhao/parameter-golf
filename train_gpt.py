@@ -61,7 +61,7 @@ class Hyperparameters:
     model_dim = int(os.environ.get("MODEL_DIM", 512))
     num_heads = int(os.environ.get("NUM_HEADS", 8))
     num_kv_groups = int(os.environ.get("NUM_KV_GROUPS", 2))
-    mlp_mult = float(os.environ.get("MLP_MULT", 2.0))
+    mlp_mult = float(os.environ.get("MLP_MULT", 1.75))
     cond_dim = int(os.environ.get("COND_DIM", 64))
     rope_base = float(os.environ.get("ROPE_BASE", 10000.0))
 
@@ -71,6 +71,11 @@ class Hyperparameters:
     beta1 = float(os.environ.get("BETA1", 0.9))
     beta2 = float(os.environ.get("BETA2", 0.95))
     grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 1.0))
+
+    # Muon optimizer hyperparameters.
+    muon_lr = float(os.environ.get("MUON_LR", 0.02))
+    muon_momentum = float(os.environ.get("MUON_MOMENTUM", 0.95))
+    muon_ns_steps = int(os.environ.get("MUON_NS_STEPS", 5))
 
     # Diffusion hyperparameters.
     noise_eps = float(os.environ.get("NOISE_EPS", 0.01))
@@ -622,6 +627,68 @@ def mdlm_loss(model: nn.Module, x0: Tensor, args: Hyperparameters) -> Tensor:
 
 
 # -----------------------------
+# MUON OPTIMIZER
+# -----------------------------
+
+def zeropower_via_newtonschulz5(G: Tensor, steps: int = 5, eps: float = 1e-7) -> Tensor:
+    """Newton-Schulz orthogonalization. G: (M, N) with M <= N."""
+    a, b, c = 3.4445, -4.7750, 2.0315
+    was_2d = G.ndim == 2
+    if was_2d:
+        G = G.unsqueeze(0)
+    X = G.bfloat16()
+    transposed = X.size(-2) > X.size(-1)
+    if transposed:
+        X = X.mT
+    X = X / (X.norm(dim=(-2, -1), keepdim=True) + eps)
+    for _ in range(steps):
+        A = X @ X.mT
+        B_mat = b * A + c * (A @ A)
+        X = a * X + B_mat @ X
+    if transposed:
+        X = X.mT
+    if was_2d:
+        X = X.squeeze(0)
+    return X
+
+
+class Muon(torch.optim.Optimizer):
+    """Muon optimizer: Nesterov momentum + Newton-Schulz orthogonalization.
+    Apply to 2D weight matrices (attn/MLP). Use AdamW for embeddings/biases/norms.
+    Reference: Kosson et al., "Muon: An optimizer for hidden layers in neural networks."
+    """
+    def __init__(self, params, lr: float = 0.02, momentum: float = 0.95,
+                 nesterov: bool = True, ns_steps: int = 5):
+        super().__init__(params, dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps))
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+        for group in self.param_groups:
+            lr = group["lr"]
+            momentum = group["momentum"]
+            nesterov = group["nesterov"]
+            ns_steps = group["ns_steps"]
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                g = p.grad.bfloat16()
+                state = self.state[p]
+                if "buf" not in state:
+                    state["buf"] = torch.zeros_like(g)
+                buf = state["buf"]
+                buf.mul_(momentum).add_(g)
+                update = g.add(buf, alpha=momentum) if nesterov else buf.clone()
+                update = zeropower_via_newtonschulz5(update, steps=ns_steps)
+                scale = max(1, p.shape[-2] / p.shape[-1]) ** 0.5
+                p.add_(update.to(dtype=p.dtype), alpha=-lr * scale)
+        return loss
+
+
+# -----------------------------
 # TRAINING
 # -----------------------------
 
@@ -697,14 +764,22 @@ def main() -> None:
     log0(f"diffusion: noise_eps={args.noise_eps} elbo_eval_steps={args.elbo_eval_steps}")
     log0(f"batch: {args.batch_size_per_gpu}x{world_size}x{args.grad_accum_steps} seq_len={args.train_seq_len}")
 
-    # Optimizer (AdamW — standard for diffusion)
-    optimizer = torch.optim.AdamW(
-        base_model.parameters(),
+    # Optimizer: Muon for 2D weight matrices, AdamW for embeddings/biases/norms/cond
+    muon_params, adamw_params = [], []
+    for name, p in base_model.named_parameters():
+        if p.ndim >= 2 and not any(k in name for k in ("wte", "sigma_map", "adaln")):
+            muon_params.append(p)
+        else:
+            adamw_params.append(p)
+    optimizer_muon = Muon(muon_params, lr=args.muon_lr, momentum=args.muon_momentum, ns_steps=args.muon_ns_steps)
+    optimizer_adamw = torch.optim.AdamW(
+        adamw_params,
         lr=args.lr,
         betas=(args.beta1, args.beta2),
         weight_decay=args.weight_decay,
         fused=True,
     )
+    log0(f"optimizer: Muon({len(muon_params)} matrices lr={args.muon_lr}) + AdamW({len(adamw_params)} tensors lr={args.lr})")
 
     # Data loader
     train_loader = DistributedSeqLoader(args.train_files, rank, world_size, device)
@@ -760,11 +835,15 @@ def main() -> None:
         # LR schedule
         elapsed_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
         lr = get_lr(step, elapsed_ms)
-        for g in optimizer.param_groups:
+        lr_scale = lr / args.lr
+        for g in optimizer_muon.param_groups:
+            g["lr"] = args.muon_lr * lr_scale
+        for g in optimizer_adamw.param_groups:
             g["lr"] = lr
 
         # Training step
-        optimizer.zero_grad(set_to_none=True)
+        optimizer_adamw.zero_grad(set_to_none=True)
+        optimizer_muon.zero_grad(set_to_none=True)
         train_loss = torch.zeros((), device=device)
         for micro_step in range(args.grad_accum_steps):
             if distributed:
@@ -778,7 +857,8 @@ def main() -> None:
 
         if args.grad_clip_norm > 0:
             torch.nn.utils.clip_grad_norm_(base_model.parameters(), args.grad_clip_norm)
-        optimizer.step()
+        optimizer_adamw.step()
+        optimizer_muon.step()
 
         step += 1
         tl = train_loss.item()
