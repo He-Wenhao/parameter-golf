@@ -46,7 +46,7 @@ class Hyperparameters:
     # Training length.
     iterations = int(os.environ.get("ITERATIONS", 20000))
     warmup_steps = int(os.environ.get("WARMUP_STEPS", 200))
-    warmdown_iters = int(os.environ.get("WARMDOWN_ITERS", 1000))
+    warmdown_iters = int(os.environ.get("WARMDOWN_ITERS", 1200))
     train_seq_len = int(os.environ.get("TRAIN_SEQ_LEN", 1024))
     batch_size_per_gpu = int(os.environ.get("BATCH_SIZE_PER_GPU", 64))
     grad_accum_steps = int(os.environ.get("GRAD_ACCUM_STEPS", 1))
@@ -57,15 +57,15 @@ class Hyperparameters:
     mask_id = vocab_size  # 1024
     total_vocab = vocab_size + 1  # 1025
     padded_vocab = int(os.environ.get("PADDED_VOCAB", 1088))  # multiple of 64 for efficiency
-    num_layers = int(os.environ.get("NUM_LAYERS", 9))
+    num_layers = int(os.environ.get("NUM_LAYERS", 8))
     model_dim = int(os.environ.get("MODEL_DIM", 512))
     num_heads = int(os.environ.get("NUM_HEADS", 8))
     num_kv_groups = int(os.environ.get("NUM_KV_GROUPS", 2))
-    mlp_mult = float(os.environ.get("MLP_MULT", 1.75))
+    mlp_mult = float(os.environ.get("MLP_MULT", 1.5))
     cond_dim = int(os.environ.get("COND_DIM", 64))
     rope_base = float(os.environ.get("ROPE_BASE", 10000.0))
     # U-Net: num encoder layers before the bottleneck (0 = disabled)
-    num_unet_layers = int(os.environ.get("NUM_UNET_LAYERS", 4))
+    num_unet_layers = int(os.environ.get("NUM_UNET_LAYERS", 3))
 
     # Optimizer hyperparameters.
     lr = float(os.environ.get("LR", 1.1e-3))
@@ -80,10 +80,10 @@ class Hyperparameters:
     muon_ns_steps = int(os.environ.get("MUON_NS_STEPS", 5))
 
     # Diffusion hyperparameters.
-    noise_eps = float(os.environ.get("NOISE_EPS", 0.01))
+    noise_eps = float(os.environ.get("NOISE_EPS", 0.1))
 
     # Eval hyperparameters.
-    elbo_eval_steps = int(os.environ.get("ELBO_EVAL_STEPS", 128))
+    elbo_eval_steps = int(os.environ.get("ELBO_EVAL_STEPS", 8))
     max_eval_seqs = int(os.environ.get("MAX_EVAL_SEQS", 256))
     final_eval_seqs = int(os.environ.get("FINAL_EVAL_SEQS", 4096))
 
@@ -176,9 +176,25 @@ def eval_elbo_bpb(
     has_leading_space_lut: Tensor,
     is_boundary_token_lut: Tensor,
 ) -> tuple[float, float]:
-    """Discrete absorbing-mask ELBO evaluation. Returns (val_loss_nats, val_bpb)."""
+    """8-point trapezoidal ELBO evaluation (discrete mask-fraction parameterization).
+    NELBO per token = integral_0^1 E[CE per masked token | mask_fraction=t] dt
+    No terminal KL needed: prior p(x_T) = all-MASK, which matches q(x_T|x_0) exactly.
+    Returns (val_loss_nats_per_token, val_bpb).
+    """
+    # 8-point trapezoidal quadrature: mask fractions and weights
+    _t = [0.05, 0.1, 0.2, 0.35, 0.5, 0.65, 0.8, 0.95]
+    _w = [(_t[1]-_t[0])/2,           # 0.025
+          (_t[2]-_t[0])/2,           # 0.075
+          (_t[3]-_t[1])/2,           # 0.125
+          (_t[4]-_t[2])/2,           # 0.15
+          (_t[5]-_t[3])/2,           # 0.15
+          (_t[6]-_t[4])/2,           # 0.15
+          (_t[7]-_t[5])/2,           # 0.15
+          (_t[7]-_t[6])/2]           # 0.075
+    T_EVAL = torch.tensor(_t, device=device, dtype=torch.float32)
+    W_EVAL = torch.tensor(_w, device=device, dtype=torch.float64)
+
     seq_len = args.train_seq_len
-    n_steps = args.elbo_eval_steps
     total_seqs = min(val_tokens.numel() // seq_len, args.max_eval_seqs)
     seq_start = (total_seqs * rank) // world_size
     seq_end = (total_seqs * (rank + 1)) // world_size
@@ -187,61 +203,40 @@ def eval_elbo_bpb(
     total_tokens = torch.zeros((), device=device, dtype=torch.float64)
     total_bytes = torch.zeros((), device=device, dtype=torch.float64)
 
-    t_grid = torch.arange(1, n_steps + 1, device=device, dtype=torch.float32) / n_steps
-    sigma_grid, alpha_grid = log_linear_noise(t_grid, eps=args.noise_eps)
-
-    # Terminal KL: at t=1, alpha_T tokens are still visible, rest are uniform over vocab
-    alpha_T = float(alpha_grid[-1].item())
-    kl_per_token_nats = float(alpha_T) * math.log(args.vocab_size)
-
     model.eval()
-    batch_size = 4  # small batch for eval to avoid OOM
+    batch_size = 4
+    unwrapped = model.module if hasattr(model, 'module') else model
     with torch.inference_mode():
         for batch_start in range(seq_start, seq_end, batch_size):
             batch_end = min(batch_start + batch_size, seq_end)
             bsz = batch_end - batch_start
 
-            # Load batch of sequences
             x0_list = []
             for s in range(batch_start, batch_end):
                 start_idx = s * seq_len
                 x0_list.append(val_tokens[start_idx : start_idx + seq_len])
             x0 = torch.stack(x0_list).to(device=device, dtype=torch.int64)
 
-            # Count bytes for BPB
             for s in range(bsz):
                 total_bytes += count_bytes_for_tokens(
                     x0[s], base_bytes_lut, has_leading_space_lut, is_boundary_token_lut
                 )
 
-            # Accumulate ELBO across timesteps
+            # 8-point quadrature: NELBO nats for this batch = Σ_k (w_k/t_k) × sum(CE × mask_k)
             seq_elbo_nats = torch.zeros(bsz, device=device, dtype=torch.float64)
-            seq_elbo_nats += seq_len * kl_per_token_nats  # terminal KL
-
-            alpha_prev = 1.0
-            for step_idx in range(n_steps):
-                alpha_curr = alpha_grid[step_idx]
-                sigma_curr = sigma_grid[step_idx].expand(bsz)
-                move_chance = 1 - alpha_curr
-
-                # Mask tokens
-                xt = torch.where(
-                    torch.rand(bsz, seq_len, device=device) < move_chance,
-                    args.mask_id, x0,
-                )
+            for t_val, w_val in zip(T_EVAL, W_EVAL):
+                sigma_k = -torch.log(1.0 - t_val).expand(bsz)
+                mask_k = torch.rand(bsz, seq_len, device=device) < t_val
+                xt = torch.where(mask_k, args.mask_id, x0)
 
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    unwrapped = model.module if hasattr(model, 'module') else model
-                    log_probs = unwrapped.subs_log_probs(xt, sigma_curr)
+                    log_probs = unwrapped.subs_log_probs(xt, sigma_k)
 
                 log_p_x0 = torch.gather(log_probs.float(), -1, x0[..., None]).squeeze(-1)
-
-                reveal_prob = (alpha_prev - float(alpha_curr)) / max(1.0 - float(alpha_curr), 1e-12)
-                is_masked = (xt == args.mask_id).float()
-                step_nats = reveal_prob * (-log_p_x0) * is_masked
-                seq_elbo_nats += step_nats.to(torch.float64).sum(dim=-1)
-
-                alpha_prev = float(alpha_curr)
+                ce_masked = (-log_p_x0) * mask_k.float()
+                # Contribution: w_k/t_k × sum(CE × mask) per sequence (total nats, not per token)
+                step_nats = (float(w_val) / float(t_val)) * ce_masked.sum(dim=-1)
+                seq_elbo_nats += step_nats.to(torch.float64)
 
             total_elbo_nats += seq_elbo_nats.sum()
             total_tokens += bsz * seq_len
@@ -547,7 +542,7 @@ class DiffusionLM(nn.Module):
             Block(dim, args.num_heads, args.mlp_mult, args.cond_dim, args.num_kv_groups)
             for _ in range(args.num_layers)
         ])
-        self.head = nn.Linear(dim, args.padded_vocab, bias=False)
+        # Tied embeddings: head uses wte.weight (saves ~557K params, improves compressibility)
 
         # U-Net skip connections: learnable per-channel scale for each encoder→decoder pair
         self.num_unet = min(args.num_unet_layers, args.num_layers // 2)
@@ -595,7 +590,7 @@ class DiffusionLM(nn.Module):
             for block in self.blocks:
                 x = block(x, cos, sin, c)
 
-        logits = self.head(rms_norm(x))[..., :self.args.total_vocab].float()
+        logits = F.linear(rms_norm(x), self.wte.weight)[..., :self.args.total_vocab].float()
         return logits
 
     def subs_log_probs(self, xt: Tensor, sigma: Tensor) -> Tensor:
@@ -620,33 +615,31 @@ class DiffusionLM(nn.Module):
 # -----------------------------
 
 def mdlm_loss(model: nn.Module, x0: Tensor, args: Hyperparameters) -> Tensor:
-    """Continuous-time NELBO loss for MDLM with importance sampling.
-    Sample sigma ~ Uniform(0, sigma_max) to eliminate dsigma variance.
-    NELBO = integral_0^sigma_max f(sigma) dsigma = sigma_max * E[f(sigma)].
+    """Discrete mask-fraction NELBO loss for MDLM.
+    Sample mask fraction t ~ Uniform(noise_eps, 1) with antithetic pairing.
+    NELBO per token = E_t[CE per masked token] = integral_0^1 E[CE/t * mask] dt.
+    Loss = mean_over_batch(CE * mask / t) which is an unbiased estimate of NELBO per token.
     """
     B, L = x0.shape
-    sigma_max = -math.log(args.noise_eps)  # ≈ 2.3 for eps=0.1
+    eps = args.noise_eps  # 0.1 — minimum mask fraction
 
-    # Antithetic uniform sigma sampling
-    sigma = torch.rand(B // 2 + 1, device=x0.device) * sigma_max
-    sigma = torch.cat([sigma, sigma_max - sigma])[:B]
+    # Antithetic sampling: t and (1+eps-t) are both in [eps, 1]
+    t_half = torch.rand(B // 2 + 1, device=x0.device) * (1 - eps) + eps
+    t = torch.cat([t_half, (1 + eps) - t_half])[:B]  # (B,)
 
-    alpha = torch.exp(-sigma)
-    move_chance = 1 - alpha
+    # Mask tokens with probability t (the mask fraction)
+    mask = torch.rand(B, L, device=x0.device) < t[:, None]
+    xt = torch.where(mask, args.mask_id, x0)
 
-    # Mask tokens independently
-    xt = torch.where(
-        torch.rand(B, L, device=x0.device) < move_chance[:, None],
-        args.mask_id, x0,
-    )
+    # Sigma for timestep conditioning: sigma = -log(1 - t) for absorbing diffusion
+    sigma = -torch.log((1 - t).clamp(min=1e-8))
 
-    log_probs = model(xt, sigma)  # Goes through DDP wrapper for gradient sync
-    log_p_x0 = torch.gather(log_probs, -1, x0[..., None]).squeeze(-1)
+    log_probs = model(xt, sigma)  # (B, L, V) via DDP wrapper for gradient sync
+    log_p_x0 = torch.gather(log_probs, -1, x0[..., None]).squeeze(-1)  # (B, L)
 
-    # No dsigma reweighting needed — absorbed by uniform sigma sampling
-    is_masked = (xt == args.mask_id).float()
-    loss = sigma_max * ((-log_p_x0) * is_masked).sum() / (B * L)
-    return loss
+    # ELBO weight: 1/t for masked positions (CE / t averaged over batch)
+    weight = mask.float() / t[:, None].clamp(min=1e-6)
+    return ((-log_p_x0) * weight).mean()
 
 
 # -----------------------------
