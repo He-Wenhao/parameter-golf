@@ -2,6 +2,7 @@
 MDLM for Parameter Golf. No AdaLN — implicit sigma via masked tokens.
 resid_mix + q_gain per block (from #1403), relu^2 MLP, 9L, fullgraph compile.
 Antithetic mask-fraction sampling for variance reduction.
+QAT (STE int8 simulation in CastedLinear) for quantization-robust training.
 """
 
 from __future__ import annotations
@@ -409,9 +410,19 @@ def eval_elbo_bpb(
 # -----------------------------
 
 class CastedLinear(nn.Linear):
-    """Weight stays fp32; cast to activation dtype at matmul time."""
+    """Weight stays fp32; cast to activation dtype at matmul time.
+    For large weights (int8-quantized at submission), simulates per-row int8
+    via STE so training directly optimizes the compressed representation."""
     def forward(self, x: Tensor) -> Tensor:
-        return F.linear(x, self.weight.to(x.dtype))
+        w = self.weight
+        if w.numel() > INT8_KEEP_FLOAT_MAX_NUMEL:
+            # Simulate the exact per-row int8 quantization used at submission time
+            w_f = w.detach().float()
+            scale = w_f.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8) / 127.0
+            w_round = ((w_f / scale).round().clamp(-127, 127) * scale).to(w.dtype)
+            # STE: forward uses quantized value, gradient passes through unchanged
+            w = w_round + w - w.detach()
+        return F.linear(x, w.to(x.dtype))
 
 
 def rms_norm(x: Tensor) -> Tensor:
