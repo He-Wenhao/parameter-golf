@@ -20,3 +20,4 @@ e485e87	1.754	8.8	16.0	discard	MDLM v12: eps=0.01 lr=1.2e-3 (artifact >16MB by 7
 0d45344	1.4160	9.5	14.71	keep	Run8: 8L cond32 mlp1.0 kv4 600s min_lr=1% (1.3959 pre-quant; 14.71MB ✓ VALID; beats Run4 by 0.023 BPB)
 0d45344	1.4151	9.5	15.47	keep	Run9: 8L cond32 mlp1.125 kv4 600s min_lr=5% (1.3756 pre-quant; 15.47MB ✓ VALID; best valid so far)
 35a5c06	1.3677	9.5	15.79	keep	Run10: no-AdaLN relu² resid_mix q_gain 9L mlp2 fullgraph 600s (1.3523 pre-quant; 15.79MB ✓ VALID; new best, -0.047 vs Run9)
+348535b	1.3723	9.5	15.79	discard	Run11: unet=4 muon_lr=0.05 (1.3534 pre-quant; higher quant penalty 0.019 vs 0.015; worse than Run10)
