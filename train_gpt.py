@@ -739,8 +739,7 @@ def main() -> None:
     log0(f"batch: {args.batch_size_per_gpu}x{world_size}x{grad_accum_steps} seq_len={args.train_seq_len}")
 
     # Compile for speed — fullgraph=True requires static control flow (fixed num_layers)
-    # max-autotune runs during warmup (before t0), so it's free w.r.t. the 600s budget
-    compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True, mode="max-autotune-no-cudagraphs")
+    compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
     model: nn.Module = DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False) if distributed else compiled_model
 
     # Optimizer groups: matrix weights (Muon), tok_emb (Adam), scalars (Adam)
