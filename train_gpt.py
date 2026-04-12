@@ -60,7 +60,7 @@ class Hyperparameters:
     num_layers = int(os.environ.get("NUM_LAYERS", 8))
     model_dim = int(os.environ.get("MODEL_DIM", 512))
     num_heads = int(os.environ.get("NUM_HEADS", 8))
-    num_kv_groups = int(os.environ.get("NUM_KV_GROUPS", 2))
+    num_kv_groups = int(os.environ.get("NUM_KV_GROUPS", 4))
     mlp_mult = float(os.environ.get("MLP_MULT", 1.5))
     cond_dim = int(os.environ.get("COND_DIM", 64))
     rope_base = float(os.environ.get("ROPE_BASE", 10000.0))
@@ -592,6 +592,8 @@ class DiffusionLM(nn.Module):
                 x = block(x, cos, sin, c)
 
         logits = F.linear(rms_norm(x), self.wte.weight)[..., :self.args.total_vocab].float()
+        # Logit softcap: tanh(x/cap)*cap stabilizes training, prevents runaway logits
+        logits = 30.0 * torch.tanh(logits / 30.0)
         return logits
 
     def subs_log_probs(self, xt: Tensor, sigma: Tensor) -> Tensor:
