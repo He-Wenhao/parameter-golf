@@ -2,7 +2,7 @@
 MDLM for Parameter Golf. No AdaLN — implicit sigma via masked tokens.
 resid_mix + q_gain per block (from #1403), relu^2 MLP, 9L, fullgraph compile.
 Antithetic mask-fraction sampling for variance reduction.
-Run17: late-stage QAT (LR<0.15), Muon WD=0.02, Kaiming init, full eval, GPTQ-lite, EMA=0.997.
+Run18: late-stage QAT (LR<0.40, ~480 steps), orthogonal init, Muon WD=0.01, full eval, GPTQ-lite, EMA=0.997.
 """
 
 from __future__ import annotations
@@ -73,7 +73,7 @@ class Hyperparameters:
     muon_momentum = float(os.environ.get("MUON_MOMENTUM", 0.95))
     muon_momentum_warmup_steps = int(os.environ.get("MUON_MOMENTUM_WARMUP_STEPS", 500))
     muon_ns_steps = int(os.environ.get("MUON_NS_STEPS", 5))
-    muon_weight_decay = float(os.environ.get("MUON_WEIGHT_DECAY", 0.02))
+    muon_weight_decay = float(os.environ.get("MUON_WEIGHT_DECAY", 0.01))
     adam_weight_decay = float(os.environ.get("ADAM_WEIGHT_DECAY", 0.0))
     beta1 = float(os.environ.get("BETA1", 0.9))
     beta2 = float(os.environ.get("BETA2", 0.95))
@@ -536,7 +536,8 @@ class DiffusionLM(nn.Module):
             if isinstance(module, CastedLinear):
                 if getattr(module, "_zero_init", False):
                     nn.init.zeros_(module.weight)
-                # else: use PyTorch default Kaiming uniform (matches PR #1403)
+                else:
+                    nn.init.orthogonal_(module.weight)  # orthogonal: better early convergence than Kaiming
 
     def _forward_blocks(self, xt: Tensor) -> Tensor:
         """Shared encoder/decoder pass. Returns (B, L, dim) hidden states."""
@@ -909,9 +910,9 @@ def main() -> None:
                 for n, p in base_model.named_parameters():
                     ema_state[n].mul_(args.ema_decay).add_(p.float(), alpha=1.0 - args.ema_decay)
 
-        # Late-stage QAT trigger: enable STE int8 simulation when LR drops below 15%
+        # Late-stage QAT trigger: enable STE int8 simulation when LR drops below 40% (~last 480 steps)
         if not CastedLinear._qat_enabled:
-            should_enable = scale < 0.15
+            should_enable = scale < 0.40
             if distributed:
                 enable_tensor = torch.tensor(int(should_enable), device=device)
                 dist.all_reduce(enable_tensor, op=dist.ReduceOp.MAX)
