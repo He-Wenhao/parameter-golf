@@ -2,7 +2,7 @@
 MDLM for Parameter Golf. No AdaLN — implicit sigma via masked tokens.
 resid_mix + q_gain per block (from #1403), relu^2 MLP, 9L, fullgraph compile.
 Antithetic mask-fraction sampling for variance reduction.
-Run16: linear LR→0, Muon+Adam WD=0.04, EMA=0.997, GPTQ-lite clip, Kaiming init.
+Run16b: linear LR→0, Muon WD=0.01, EMA=0.997, GPTQ-lite clip, orthogonal init.
 """
 
 from __future__ import annotations
@@ -73,8 +73,8 @@ class Hyperparameters:
     muon_momentum = float(os.environ.get("MUON_MOMENTUM", 0.95))
     muon_momentum_warmup_steps = int(os.environ.get("MUON_MOMENTUM_WARMUP_STEPS", 500))
     muon_ns_steps = int(os.environ.get("MUON_NS_STEPS", 5))
-    muon_weight_decay = float(os.environ.get("MUON_WEIGHT_DECAY", 0.04))
-    adam_weight_decay = float(os.environ.get("ADAM_WEIGHT_DECAY", 0.04))
+    muon_weight_decay = float(os.environ.get("MUON_WEIGHT_DECAY", 0.01))
+    adam_weight_decay = float(os.environ.get("ADAM_WEIGHT_DECAY", 0.0))
     beta1 = float(os.environ.get("BETA1", 0.9))
     beta2 = float(os.environ.get("BETA2", 0.95))
     adam_eps = float(os.environ.get("ADAM_EPS", 1e-8))
@@ -527,7 +527,8 @@ class DiffusionLM(nn.Module):
             if isinstance(module, CastedLinear):
                 if getattr(module, "_zero_init", False):
                     nn.init.zeros_(module.weight)
-                # Non-zero-init: use PyTorch default Kaiming uniform (matches #1403)
+                else:
+                    nn.init.orthogonal_(module.weight)  # restored: Kaiming+WD caused failure
 
     def _forward_blocks(self, xt: Tensor) -> Tensor:
         """Shared encoder/decoder pass. Returns (B, L, dim) hidden states."""
@@ -775,7 +776,7 @@ def main() -> None:
 
     optimizer_emb = torch.optim.Adam(
         [{"params": [base_model.tok_emb.weight], "lr": args.embed_lr, "base_lr": args.embed_lr}],
-        betas=(args.beta1, args.beta2), eps=args.adam_eps, weight_decay=args.adam_weight_decay, fused=True,
+        betas=(args.beta1, args.beta2), eps=args.adam_eps, fused=True,  # no WD on embedding
     )
     optimizer_scalar = torch.optim.Adam(
         [{"params": scalar_params, "lr": args.scalar_lr, "base_lr": args.scalar_lr}],
