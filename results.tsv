@@ -17,4 +17,4 @@ e485e87	1.754	8.8	16.0	discard	MDLM v12: eps=0.01 lr=1.2e-3 (artifact >16MB by 7
 5c3ea9c	1.4143	9.5	15.91	discard	Run5: fused-SwiGLU + kv_groups=4 + min_lr=5% + 720s (INVALID: 720s > 600s competition cap)
 74a9ef0	1.4029	9.5	14.66	discard	Run6: cond_dim=32 + SwiGLU-hidden=512 + 900s (INVALID: 900s > 600s competition cap)
 0a6b47c	killed	9.5	~18MB	discard	Run7: 9L + SwiGLU-hidden=512 + 1080s + min_lr=1% (INVALID: 9L artifact >16MB + 1080s > cap; killed)
-TBD	TBD	9.5	~14.66	running	Run8: 8L cond32 mlp1.0 kv4 600s min_lr=1% (COMPETITION VALID; same arch as Run6 but 600s)
+0d45344	1.4160	9.5	14.71	keep	Run8: 8L cond32 mlp1.0 kv4 600s min_lr=1% (1.3959 pre-quant; 14.71MB ✓ VALID; beats Run4 by 0.023 BPB)
