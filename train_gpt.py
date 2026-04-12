@@ -50,7 +50,7 @@ class Hyperparameters:
     train_seq_len = int(os.environ.get("TRAIN_SEQ_LEN", 1024))
     batch_size_per_gpu = int(os.environ.get("BATCH_SIZE_PER_GPU", 64))
     grad_accum_steps = int(os.environ.get("GRAD_ACCUM_STEPS", 1))
-    max_wallclock_seconds = float(os.environ.get("MAX_WALLCLOCK_SECONDS", 600.0))
+    max_wallclock_seconds = float(os.environ.get("MAX_WALLCLOCK_SECONDS", 720.0))
 
     # Model shape.
     vocab_size = int(os.environ.get("VOCAB_SIZE", 1024))
@@ -60,7 +60,7 @@ class Hyperparameters:
     num_layers = int(os.environ.get("NUM_LAYERS", 8))
     model_dim = int(os.environ.get("MODEL_DIM", 512))
     num_heads = int(os.environ.get("NUM_HEADS", 8))
-    num_kv_groups = int(os.environ.get("NUM_KV_GROUPS", 2))
+    num_kv_groups = int(os.environ.get("NUM_KV_GROUPS", 4))
     mlp_mult = float(os.environ.get("MLP_MULT", 0.875))  # SwiGLU hidden = dim * mlp_mult = 448
     cond_dim = int(os.environ.get("COND_DIM", 64))
     rope_base = float(os.environ.get("ROPE_BASE", 10000.0))
@@ -73,6 +73,9 @@ class Hyperparameters:
     beta1 = float(os.environ.get("BETA1", 0.9))
     beta2 = float(os.environ.get("BETA2", 0.95))
     grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 1.0))
+
+    # LR schedule: min LR = min_lr_ratio * lr (more aggressive warmdown → better final BPB)
+    min_lr_ratio = float(os.environ.get("MIN_LR_RATIO", 0.05))
 
     # Muon optimizer hyperparameters.
     muon_lr = float(os.environ.get("MUON_LR", 0.04))
@@ -521,16 +524,18 @@ class Block(nn.Module):
         self.attn = BidirectionalAttention(dim, num_heads, num_kv_groups)
         self.adaln_attn = AdaLN(dim, cond_dim)
         self.adaln_mlp = AdaLN(dim, cond_dim)
-        # SwiGLU: 3 matrices; hidden = dim * mlp_mult (set mlp_mult=0.875 for hidden=448 → fits 16MB)
+        # Fused SwiGLU: single Linear(dim, 2*hidden) for gate+up (one matmul vs two → faster)
+        # hidden = dim * mlp_mult (mlp_mult=0.875 → hidden=448, saves ~745KB vs 768-hidden MLPs)
         hidden = int(dim * mlp_mult)
-        self.mlp_gate = nn.Linear(dim, hidden, bias=False)
-        self.mlp_up = nn.Linear(dim, hidden, bias=False)
+        self.mlp_fused = nn.Linear(dim, 2 * hidden, bias=False)
         self.mlp_proj = nn.Linear(hidden, dim, bias=False)
 
     def forward(self, x: Tensor, cos: Tensor, sin: Tensor, c: Tensor) -> Tensor:
         x = x + self.attn(self.adaln_attn(x, c), cos, sin)
         x_mlp = self.adaln_mlp(x, c)
-        h = F.silu(self.mlp_gate(x_mlp)) * self.mlp_up(x_mlp)
+        fused = self.mlp_fused(x_mlp)
+        hidden = fused.shape[-1] // 2
+        h = F.silu(fused[..., :hidden]) * fused[..., hidden:]
         x = x + self.mlp_proj(h)
         return x
 
@@ -782,7 +787,7 @@ def main() -> None:
     n_params = sum(p.numel() for p in base_model.parameters())
     log0(f"model:DiffusionLM(MDLM) params:{n_params}")
     log0(f"arch: {args.num_layers}L {args.model_dim}d {args.num_heads}h SwiGLU-hidden={int(args.model_dim*args.mlp_mult)}")
-    log0(f"training: lr={args.lr} wd={args.weight_decay} grad_clip={args.grad_clip_norm}")
+    log0(f"training: lr={args.lr} min_lr_ratio={args.min_lr_ratio} wd={args.weight_decay} grad_clip={args.grad_clip_norm}")
     log0(f"diffusion: noise_eps={args.noise_eps} elbo_eval_steps={args.elbo_eval_steps}")
     log0(f"batch: {args.batch_size_per_gpu}x{world_size}x{args.grad_accum_steps} seq_len={args.train_seq_len}")
 
@@ -812,14 +817,15 @@ def main() -> None:
         # Warmup
         if step < args.warmup_steps:
             return args.lr * (step + 1) / args.warmup_steps
-        # Warmdown based on wallclock
+        # Warmdown based on wallclock: cosine from lr to min_lr_ratio*lr
         if max_wallclock_ms is not None:
             step_ms = elapsed_ms / max(step, 1)
             warmdown_ms = args.warmdown_iters * step_ms
             remaining_ms = max(max_wallclock_ms - elapsed_ms, 0.0)
             if remaining_ms <= warmdown_ms:
                 progress = remaining_ms / max(warmdown_ms, 1e-9)
-                return args.lr * (0.1 + 0.9 * (0.5 * (1 + math.cos(math.pi * (1 - progress)))))
+                min_lr = args.min_lr_ratio
+                return args.lr * (min_lr + (1 - min_lr) * (0.5 * (1 + math.cos(math.pi * (1 - progress)))))
         return args.lr
 
     # Training loop
