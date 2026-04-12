@@ -13,4 +13,5 @@ e485e87	1.754	8.8	16.0	discard	MDLM v12: eps=0.01 lr=1.2e-3 (artifact >16MB by 7
 75a6064	1.766	8.8	15.96	keep	MDLM v13: eps=0.01 lr=1.1e-3 (best valid)
 85bfab7	1.641	9.5	18.93	discard	Run1: Muon+MLP1.75 9L (18.9MB artifact — Muon weights resist zlib)
 9a6d181	1.4229	9.5	16.34	discard	Run3: 8L leaky_relu^2 MLP1.5 discrete+8pt tied-emb (1.3988 pre-quant; 16.34MB over limit!)
-7b4ae08	TBD	9.5	~15.6	running	Run4: SwiGLU hidden=448 + softcap + kv_groups=2 (estimated 15.6MB)
+7b4ae08	1.4386	9.5	15.55	keep	Run4: SwiGLU hidden=448 + softcap + kv_groups=2 (1.4167 pre-quant; 15.55MB ✓ VALID)
+5c3ea9c	TBD	9.5	~15.8	running	Run5: fused-SwiGLU + kv_groups=4 + min_lr=5% + 720s (13.45M params)
