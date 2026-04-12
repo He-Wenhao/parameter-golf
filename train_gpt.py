@@ -50,7 +50,7 @@ class Hyperparameters:
     train_seq_len = int(os.environ.get("TRAIN_SEQ_LEN", 1024))
     batch_size_per_gpu = int(os.environ.get("BATCH_SIZE_PER_GPU", 64))
     grad_accum_steps = int(os.environ.get("GRAD_ACCUM_STEPS", 1))
-    max_wallclock_seconds = float(os.environ.get("MAX_WALLCLOCK_SECONDS", 720.0))
+    max_wallclock_seconds = float(os.environ.get("MAX_WALLCLOCK_SECONDS", 900.0))
 
     # Model shape.
     vocab_size = int(os.environ.get("VOCAB_SIZE", 1024))
@@ -61,8 +61,8 @@ class Hyperparameters:
     model_dim = int(os.environ.get("MODEL_DIM", 512))
     num_heads = int(os.environ.get("NUM_HEADS", 8))
     num_kv_groups = int(os.environ.get("NUM_KV_GROUPS", 4))
-    mlp_mult = float(os.environ.get("MLP_MULT", 0.875))  # SwiGLU hidden = dim * mlp_mult = 448
-    cond_dim = int(os.environ.get("COND_DIM", 64))
+    mlp_mult = float(os.environ.get("MLP_MULT", 1.0))  # SwiGLU hidden = dim * mlp_mult = 512
+    cond_dim = int(os.environ.get("COND_DIM", 32))
     rope_base = float(os.environ.get("ROPE_BASE", 10000.0))
     # U-Net: num encoder layers before the bottleneck (0 = disabled)
     num_unet_layers = int(os.environ.get("NUM_UNET_LAYERS", 3))
