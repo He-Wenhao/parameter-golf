@@ -60,8 +60,8 @@ class Hyperparameters:
     num_layers = int(os.environ.get("NUM_LAYERS", 8))
     model_dim = int(os.environ.get("MODEL_DIM", 512))
     num_heads = int(os.environ.get("NUM_HEADS", 8))
-    num_kv_groups = int(os.environ.get("NUM_KV_GROUPS", 4))
-    mlp_mult = float(os.environ.get("MLP_MULT", 1.5))
+    num_kv_groups = int(os.environ.get("NUM_KV_GROUPS", 2))
+    mlp_mult = float(os.environ.get("MLP_MULT", 0.875))  # SwiGLU hidden = dim * mlp_mult = 448
     cond_dim = int(os.environ.get("COND_DIM", 64))
     rope_base = float(os.environ.get("ROPE_BASE", 10000.0))
     # U-Net: num encoder layers before the bottleneck (0 = disabled)
@@ -521,14 +521,17 @@ class Block(nn.Module):
         self.attn = BidirectionalAttention(dim, num_heads, num_kv_groups)
         self.adaln_attn = AdaLN(dim, cond_dim)
         self.adaln_mlp = AdaLN(dim, cond_dim)
+        # SwiGLU: 3 matrices; hidden = dim * mlp_mult (set mlp_mult=0.875 for hidden=448 → fits 16MB)
         hidden = int(dim * mlp_mult)
-        self.mlp_fc = nn.Linear(dim, hidden, bias=False)
+        self.mlp_gate = nn.Linear(dim, hidden, bias=False)
+        self.mlp_up = nn.Linear(dim, hidden, bias=False)
         self.mlp_proj = nn.Linear(hidden, dim, bias=False)
 
     def forward(self, x: Tensor, cos: Tensor, sin: Tensor, c: Tensor) -> Tensor:
         x = x + self.attn(self.adaln_attn(x, c), cos, sin)
-        h = F.leaky_relu(self.mlp_fc(self.adaln_mlp(x, c)), negative_slope=0.5)
-        x = x + self.mlp_proj(h.square())
+        x_mlp = self.adaln_mlp(x, c)
+        h = F.silu(self.mlp_gate(x_mlp)) * self.mlp_up(x_mlp)
+        x = x + self.mlp_proj(h)
         return x
 
 
@@ -778,7 +781,7 @@ def main() -> None:
 
     n_params = sum(p.numel() for p in base_model.parameters())
     log0(f"model:DiffusionLM(MDLM) params:{n_params}")
-    log0(f"arch: {args.num_layers}L {args.model_dim}d {args.num_heads}h {args.mlp_mult}xMLP")
+    log0(f"arch: {args.num_layers}L {args.model_dim}d {args.num_heads}h SwiGLU-hidden={int(args.model_dim*args.mlp_mult)}")
     log0(f"training: lr={args.lr} wd={args.weight_decay} grad_clip={args.grad_clip_norm}")
     log0(f"diffusion: noise_eps={args.noise_eps} elbo_eval_steps={args.elbo_eval_steps}")
     log0(f"batch: {args.batch_size_per_gpu}x{world_size}x{args.grad_accum_steps} seq_len={args.train_seq_len}")
