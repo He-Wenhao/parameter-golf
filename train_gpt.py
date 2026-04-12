@@ -2,7 +2,7 @@
 MDLM for Parameter Golf. No AdaLN — implicit sigma via masked tokens.
 resid_mix + q_gain per block (from #1403), relu^2 MLP, 9L, fullgraph compile.
 Antithetic mask-fraction sampling for variance reduction.
-QAT (STE int8 simulation in CastedLinear) for quantization-robust training.
+Run16: QAT (STE), linear LR to 0, Muon+Adam WD=0.04, EMA=0.997, GPTQ-lite clip.
 """
 
 from __future__ import annotations
@@ -73,11 +73,14 @@ class Hyperparameters:
     muon_momentum = float(os.environ.get("MUON_MOMENTUM", 0.95))
     muon_momentum_warmup_steps = int(os.environ.get("MUON_MOMENTUM_WARMUP_STEPS", 500))
     muon_ns_steps = int(os.environ.get("MUON_NS_STEPS", 5))
+    muon_weight_decay = float(os.environ.get("MUON_WEIGHT_DECAY", 0.04))
+    adam_weight_decay = float(os.environ.get("ADAM_WEIGHT_DECAY", 0.04))
     beta1 = float(os.environ.get("BETA1", 0.9))
     beta2 = float(os.environ.get("BETA2", 0.95))
     adam_eps = float(os.environ.get("ADAM_EPS", 1e-8))
     grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
-    min_lr_ratio = float(os.environ.get("MIN_LR_RATIO", 0.05))
+    min_lr_ratio = float(os.environ.get("MIN_LR_RATIO", 0.0))  # Linear warmdown to 0 (matches #1403)
+    ema_decay = float(os.environ.get("EMA_DECAY", 0.997))      # EMA weight averaging
 
     # Diffusion hyperparameters.
     noise_eps = float(os.environ.get("NOISE_EPS", 0.1))
@@ -120,16 +123,23 @@ def keep_float_tensor(name: str, t: Tensor, passthrough_orig_dtypes: dict[str, s
 
 
 def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor]:
+    """Per-row int8 quantization with GPTQ-lite: try 5 clip percentiles, keep min MSE."""
     t32 = t.float()
     if t32.ndim == 2:
-        clip_abs = (
-            torch.quantile(t32.abs(), INT8_CLIP_Q, dim=1)
-            if t32.numel() else torch.empty((t32.shape[0],), dtype=torch.float32)
-        )
-        clipped = torch.maximum(torch.minimum(t32, clip_abs[:, None]), -clip_abs[:, None])
-        scale = (clip_abs / 127.0).clamp_min(1.0 / 127.0)
-        q = torch.clamp(torch.round(clipped / scale[:, None]), -127, 127).to(torch.int8).contiguous()
-        return q, scale.to(dtype=INT8_PER_ROW_SCALE_DTYPE).contiguous()
+        if not t32.numel():
+            return (torch.empty_like(t32, dtype=torch.int8),
+                    torch.empty((t32.shape[0],), dtype=INT8_PER_ROW_SCALE_DTYPE))
+        best_q: Tensor | None = None
+        best_scale: Tensor | None = None
+        best_err = float("inf")
+        for pct in [0.9990, 0.9995, 0.9999, 0.99999, 1.0]:
+            clip_abs = torch.quantile(t32.abs(), pct, dim=1) if pct < 1.0 else t32.abs().amax(dim=1)
+            scale = (clip_abs / 127.0).clamp_min(1.0 / 127.0)
+            q = torch.clamp(torch.round(t32 / scale[:, None]), -127, 127).to(torch.int8)
+            err = (t32 - q.float() * scale[:, None]).pow(2).mean().item()
+            if err < best_err:
+                best_q, best_scale, best_err = q, scale, err
+        return best_q.contiguous(), best_scale.to(dtype=INT8_PER_ROW_SCALE_DTYPE).contiguous()  # type: ignore[union-attr]
     clip_abs = float(torch.quantile(t32.abs().flatten(), INT8_CLIP_Q).item()) if t32.numel() else 0.0
     scale = torch.tensor(clip_abs / 127.0 if clip_abs > 0 else 1.0, dtype=torch.float32)
     q = torch.clamp(torch.round(torch.clamp(t32, -clip_abs, clip_abs) / scale), -127, 127).to(torch.int8).contiguous()
@@ -527,8 +537,7 @@ class DiffusionLM(nn.Module):
             if isinstance(module, CastedLinear):
                 if getattr(module, "_zero_init", False):
                     nn.init.zeros_(module.weight)
-                else:
-                    nn.init.orthogonal_(module.weight)
+                # Non-zero-init: use PyTorch default Kaiming uniform (matches #1403)
 
     def _forward_blocks(self, xt: Tensor) -> Tensor:
         """Shared encoder/decoder pass. Returns (B, L, dim) hidden states."""
@@ -617,8 +626,9 @@ zeropower_via_newtonschulz5 = torch.compile(zeropower_via_newtonschulz5)
 class Muon(torch.optim.Optimizer):
     """Muon with distributed Newton-Schulz sharding across GPUs."""
     def __init__(self, params, lr: float = 0.02, momentum: float = 0.95,
-                 nesterov: bool = True, ns_steps: int = 5):
-        super().__init__(params, dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps))
+                 nesterov: bool = True, ns_steps: int = 5, weight_decay: float = 0.0):
+        super().__init__(params, dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps,
+                                     weight_decay=weight_decay))
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -660,8 +670,11 @@ class Muon(torch.optim.Optimizer):
             if distributed:
                 dist.all_reduce(updates_flat, op=dist.ReduceOp.SUM)
 
+            wd = group.get("weight_decay", 0.0)
             curr = 0
             for p in params:
+                if wd > 0.0:
+                    p.data.mul_(1.0 - lr * wd)  # Decoupled L2 weight decay before update
                 p.add_(updates_flat[curr : curr + p.numel()].view_as(p).to(dtype=p.dtype), alpha=-lr)
                 curr += p.numel()
 
@@ -765,20 +778,21 @@ def main() -> None:
     ]
     scalar_params.append(base_model.skip_weights)
 
-    optimizer_muon = Muon(matrix_params, lr=args.muon_lr, momentum=args.muon_momentum, ns_steps=args.muon_ns_steps)
+    optimizer_muon = Muon(matrix_params, lr=args.muon_lr, momentum=args.muon_momentum,
+                          ns_steps=args.muon_ns_steps, weight_decay=args.muon_weight_decay)
     for g in optimizer_muon.param_groups:
         g["base_lr"] = args.muon_lr
 
     optimizer_emb = torch.optim.Adam(
         [{"params": [base_model.tok_emb.weight], "lr": args.embed_lr, "base_lr": args.embed_lr}],
-        betas=(args.beta1, args.beta2), eps=args.adam_eps, fused=True,
+        betas=(args.beta1, args.beta2), eps=args.adam_eps, weight_decay=args.adam_weight_decay, fused=True,
     )
     optimizer_scalar = torch.optim.Adam(
         [{"params": scalar_params, "lr": args.scalar_lr, "base_lr": args.scalar_lr}],
         betas=(args.beta1, args.beta2), eps=args.adam_eps, fused=True,
     )
     optimizers = [optimizer_muon, optimizer_emb, optimizer_scalar]
-    log0(f"optimizer: Muon({len(matrix_params)} matrices) + Adam(emb+scalars)")
+    log0(f"optimizer: Muon({len(matrix_params)} matrices, wd={args.muon_weight_decay}) + Adam(emb+scalars, wd={args.adam_weight_decay})")
 
     train_loader = DistributedSeqLoader(args.train_files, rank, world_size, device)
 
@@ -789,7 +803,7 @@ def main() -> None:
     max_wallclock_ms = 1000.0 * args.max_wallclock_seconds if args.max_wallclock_seconds > 0 else None
 
     def lr_scale(step: int, elapsed_ms: float) -> float:
-        """Returns LR multiplier in [min_lr_ratio, 1.0]. Warmdown is wallclock-adaptive."""
+        """Returns LR multiplier. Linear warmdown to min_lr_ratio (0 by default, matches #1403)."""
         if max_wallclock_ms is None:
             return 1.0
         step_ms = elapsed_ms / max(step, 1)
@@ -797,8 +811,7 @@ def main() -> None:
         remaining_ms = max(max_wallclock_ms - elapsed_ms, 0.0)
         if remaining_ms <= warmdown_ms:
             progress = remaining_ms / max(warmdown_ms, 1e-9)  # 1.0 at start, 0.0 at end
-            min_r = args.min_lr_ratio
-            return min_r + (1.0 - min_r) * 0.5 * (1.0 + math.cos(math.pi * (1.0 - progress)))
+            return args.min_lr_ratio + (1.0 - args.min_lr_ratio) * progress  # Linear
         return 1.0
 
     # Warmup: prime torch.compile then reset state
@@ -822,6 +835,11 @@ def main() -> None:
             opt.load_state_dict(state)
         zero_grad_all()
         train_loader = DistributedSeqLoader(args.train_files, rank, world_size, device)
+
+    # EMA state: maintain running average of float32 model weights
+    ema_state: dict[str, Tensor] = {}
+    if args.ema_decay > 0:
+        ema_state = {n: p.detach().float().clone() for n, p in base_model.named_parameters()}
 
     # Main training loop
     training_time_ms = 0.0
@@ -886,6 +904,12 @@ def main() -> None:
         for opt in optimizers:
             opt.step()
 
+        # EMA update
+        if ema_state:
+            with torch.no_grad():
+                for n, p in base_model.named_parameters():
+                    ema_state[n].mul_(args.ema_decay).add_(p.float(), alpha=1.0 - args.ema_decay)
+
         step += 1
         tl = train_loss.item()
         ema_loss = tl if step == 1 else 0.95 * ema_loss + 0.05 * tl
@@ -909,6 +933,13 @@ def main() -> None:
         f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB "
         f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB"
     )
+
+    # Load EMA weights before serialization (if EMA is active, use averaged weights)
+    if ema_state:
+        sd = base_model.state_dict()
+        ema_sd = {n: ema_state[n].to(sd[n].dtype) for n in ema_state}
+        base_model.load_state_dict(ema_sd, strict=False)
+        log0("EMA weights loaded for serialization")
 
     # Serialization + roundtrip validation
     if master_process:
