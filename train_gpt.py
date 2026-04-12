@@ -2,7 +2,7 @@
 MDLM for Parameter Golf. No AdaLN — implicit sigma via masked tokens.
 resid_mix + q_gain per block (from #1403), relu^2 MLP, 9L, fullgraph compile.
 Antithetic mask-fraction sampling for variance reduction.
-Run16b: linear LR→0, Muon WD=0.01, EMA=0.997, GPTQ-lite clip, orthogonal init.
+Run17: late-stage QAT (LR<0.15), Muon WD=0.02, Kaiming init, full eval, GPTQ-lite, EMA=0.997.
 """
 
 from __future__ import annotations
@@ -73,7 +73,7 @@ class Hyperparameters:
     muon_momentum = float(os.environ.get("MUON_MOMENTUM", 0.95))
     muon_momentum_warmup_steps = int(os.environ.get("MUON_MOMENTUM_WARMUP_STEPS", 500))
     muon_ns_steps = int(os.environ.get("MUON_NS_STEPS", 5))
-    muon_weight_decay = float(os.environ.get("MUON_WEIGHT_DECAY", 0.01))
+    muon_weight_decay = float(os.environ.get("MUON_WEIGHT_DECAY", 0.02))
     adam_weight_decay = float(os.environ.get("ADAM_WEIGHT_DECAY", 0.0))
     beta1 = float(os.environ.get("BETA1", 0.9))
     beta2 = float(os.environ.get("BETA2", 0.95))
@@ -87,7 +87,7 @@ class Hyperparameters:
 
     # Eval hyperparameters.
     max_eval_seqs = int(os.environ.get("MAX_EVAL_SEQS", 512))
-    final_eval_seqs = int(os.environ.get("FINAL_EVAL_SEQS", 4096))
+    final_eval_seqs = int(os.environ.get("FINAL_EVAL_SEQS", 100000))  # use all val seqs
 
 
 # -----------------------------
@@ -420,9 +420,18 @@ def eval_elbo_bpb(
 # -----------------------------
 
 class CastedLinear(nn.Linear):
-    """Weight stays fp32; cast to activation dtype at matmul time."""
+    """Weight stays fp32; cast to activation dtype at matmul time. Late-stage QAT via STE."""
+    _qat_enabled: bool = False
+
     def forward(self, x: Tensor) -> Tensor:
-        return F.linear(x, self.weight.to(x.dtype))
+        w = self.weight.to(x.dtype)
+        if CastedLinear._qat_enabled and self.training and w.ndim == 2:
+            # STE: forward uses int8-quantized weights; gradient passes through identity
+            w32 = self.weight.detach().float()
+            scale = (w32.abs().amax(dim=1) / 127.0).clamp_min(1.0 / 127.0)
+            w_q = (torch.clamp(torch.round(w32 / scale[:, None]), -127, 127) * scale[:, None]).to(x.dtype)
+            w = w + (w_q - w).detach()  # STE: forward=w_q, backward=identity
+        return F.linear(x, w)
 
 
 def rms_norm(x: Tensor) -> Tensor:
@@ -527,8 +536,7 @@ class DiffusionLM(nn.Module):
             if isinstance(module, CastedLinear):
                 if getattr(module, "_zero_init", False):
                     nn.init.zeros_(module.weight)
-                else:
-                    nn.init.orthogonal_(module.weight)  # restored: Kaiming+WD caused failure
+                # else: use PyTorch default Kaiming uniform (matches PR #1403)
 
     def _forward_blocks(self, xt: Tensor) -> Tensor:
         """Shared encoder/decoder pass. Returns (B, L, dim) hidden states."""
@@ -900,6 +908,17 @@ def main() -> None:
             with torch.no_grad():
                 for n, p in base_model.named_parameters():
                     ema_state[n].mul_(args.ema_decay).add_(p.float(), alpha=1.0 - args.ema_decay)
+
+        # Late-stage QAT trigger: enable STE int8 simulation when LR drops below 15%
+        if not CastedLinear._qat_enabled:
+            should_enable = scale < 0.15
+            if distributed:
+                enable_tensor = torch.tensor(int(should_enable), device=device)
+                dist.all_reduce(enable_tensor, op=dist.ReduceOp.MAX)
+                should_enable = bool(enable_tensor.item())
+            if should_enable:
+                CastedLinear._qat_enabled = True
+                log0(f"QAT enabled: step={step} lr_scale={scale:.3f}")
 
         step += 1
         tl = train_loss.item()
