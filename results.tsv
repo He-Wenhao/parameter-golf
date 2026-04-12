@@ -15,4 +15,5 @@ e485e87	1.754	8.8	16.0	discard	MDLM v12: eps=0.01 lr=1.2e-3 (artifact >16MB by 7
 9a6d181	1.4229	9.5	16.34	discard	Run3: 8L leaky_relu^2 MLP1.5 discrete+8pt tied-emb (1.3988 pre-quant; 16.34MB over limit!)
 7b4ae08	1.4386	9.5	15.55	keep	Run4: SwiGLU hidden=448 + softcap + kv_groups=2 (1.4167 pre-quant; 15.55MB ✓ VALID)
 5c3ea9c	1.4143	9.5	15.91	keep	Run5: fused-SwiGLU + kv_groups=4 + min_lr=5% + 720s (1.4047 pre-quant; 15.91MB ✓ VALID)
-TBD	TBD	9.5	~15.7	running	Run6: cond_dim=32 + SwiGLU-hidden=512 + 900s (larger MLP, smaller cond)
+74a9ef0	1.4029	9.5	14.66	keep	Run6: cond_dim=32 + SwiGLU-hidden=512 + 900s (1.3806 pre-quant; 14.66MB ✓ VALID; 2.07MB headroom!)
+TBD	TBD	9.5	~16.44	running	Run7: 9L + SwiGLU-hidden=512 + 1080s + min_lr=1% (more depth, headroom allows 9th layer)
