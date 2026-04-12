@@ -64,6 +64,8 @@ class Hyperparameters:
     mlp_mult = float(os.environ.get("MLP_MULT", 1.75))
     cond_dim = int(os.environ.get("COND_DIM", 64))
     rope_base = float(os.environ.get("ROPE_BASE", 10000.0))
+    # U-Net: num encoder layers before the bottleneck (0 = disabled)
+    num_unet_layers = int(os.environ.get("NUM_UNET_LAYERS", 4))
 
     # Optimizer hyperparameters.
     lr = float(os.environ.get("LR", 1.1e-3))
@@ -73,7 +75,7 @@ class Hyperparameters:
     grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 1.0))
 
     # Muon optimizer hyperparameters.
-    muon_lr = float(os.environ.get("MUON_LR", 0.02))
+    muon_lr = float(os.environ.get("MUON_LR", 0.04))
     muon_momentum = float(os.environ.get("MUON_MOMENTUM", 0.95))
     muon_ns_steps = int(os.environ.get("MUON_NS_STEPS", 5))
 
@@ -547,6 +549,11 @@ class DiffusionLM(nn.Module):
         ])
         self.head = nn.Linear(dim, args.padded_vocab, bias=False)
 
+        # U-Net skip connections: learnable per-channel scale for each encoder→decoder pair
+        self.num_unet = min(args.num_unet_layers, args.num_layers // 2)
+        if self.num_unet > 0:
+            self.skip_weights = nn.Parameter(torch.ones(self.num_unet, dim))
+
         # Precompute RoPE
         hd = dim // args.num_heads
         inv_freq = 1.0 / (args.rope_base ** (torch.arange(0, hd, 2, dtype=torch.float32) / hd))
@@ -570,8 +577,24 @@ class DiffusionLM(nn.Module):
         c = F.silu(self.sigma_map(sigma)).to(dtype=x.dtype)
         cos = self.rope_cos[:, :, :T].to(dtype=x.dtype)
         sin = self.rope_sin[:, :, :T].to(dtype=x.dtype)
-        for block in self.blocks:
-            x = block(x, cos, sin, c)
+
+        if self.num_unet > 0:
+            # Encoder pass: first num_unet layers, collect outputs for skip connections
+            skips = []
+            for i in range(self.num_unet):
+                x = self.blocks[i](x, cos, sin, c)
+                skips.append(x)
+            # Middle layers (bottleneck)
+            for i in range(self.num_unet, len(self.blocks) - self.num_unet):
+                x = self.blocks[i](x, cos, sin, c)
+            # Decoder pass: last num_unet layers, add skip-weighted encoder outputs
+            for i in range(self.num_unet):
+                x = x + self.skip_weights[i].to(dtype=x.dtype) * skips[self.num_unet - 1 - i]
+                x = self.blocks[len(self.blocks) - self.num_unet + i](x, cos, sin, c)
+        else:
+            for block in self.blocks:
+                x = block(x, cos, sin, c)
+
         logits = self.head(rms_norm(x))[..., :self.args.total_vocab].float()
         return logits
 
@@ -767,7 +790,7 @@ def main() -> None:
     # Optimizer: Muon for 2D weight matrices, AdamW for embeddings/biases/norms/cond
     muon_params, adamw_params = [], []
     for name, p in base_model.named_parameters():
-        if p.ndim >= 2 and not any(k in name for k in ("wte", "sigma_map", "adaln")):
+        if p.ndim >= 2 and not any(k in name for k in ("wte", "sigma_map", "adaln", "skip_weights")):
             muon_params.append(p)
         else:
             adamw_params.append(p)
