@@ -506,6 +506,11 @@ class DiffusionLM(nn.Module):
         self.register_buffer("rope_cos", freqs.cos()[None, None, :, :])
         self.register_buffer("rope_sin", freqs.sin()[None, None, :, :])
 
+        # Precompute logit bias: suppress mask token without in-place scatter (graph-break-free)
+        logit_bias = torch.zeros(args.total_vocab)
+        logit_bias[args.mask_id] = -1e6
+        self.register_buffer("logit_bias", logit_bias)
+
         self._init_weights()
 
     def _init_weights(self) -> None:
@@ -525,11 +530,11 @@ class DiffusionLM(nn.Module):
         cos = self.rope_cos[:, :, :L].to(dtype=x.dtype)
         sin = self.rope_sin[:, :, :L].to(dtype=x.dtype)
 
-        # Encoder: collect skips
-        skips: list[Tensor] = []
+        # Encoder: collect skips (pre-allocated to avoid dynamic list growth)
+        skips: list[Tensor] = [x] * self.num_encoder_layers
         for i in range(self.num_encoder_layers):
             x = self.blocks[i](x, x0, cos, sin)
-            skips.append(x)
+            skips[i] = x
 
         # Decoder: add reversed encoder skips (last encoder → first decoder)
         for i in range(self.num_decoder_layers):
@@ -544,7 +549,7 @@ class DiffusionLM(nn.Module):
         """Project hidden states to vocab logits with softcap."""
         cap = self.args.logit_softcap
         logits = F.linear(rms_norm(h), self.tok_emb.weight).float()[..., :self.args.total_vocab]
-        logits[..., self.args.mask_id] = -1e6
+        logits = logits + self.logit_bias  # suppress mask token without in-place scatter
         return cap * torch.tanh(logits / cap)
 
     def forward(self, masked_ids: Tensor, original_ids: Tensor, mask_float: Tensor, t: Tensor) -> Tensor:
@@ -737,7 +742,8 @@ def main() -> None:
     log0(f"batch: {args.batch_size_per_gpu}x{world_size}x{grad_accum_steps} seq_len={args.train_seq_len}")
 
     # Compile for speed — fullgraph=True requires static control flow (fixed num_layers)
-    compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
+    # max-autotune runs during warmup (before t0), so it's free w.r.t. the 600s budget
+    compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True, mode="max-autotune-no-cudagraphs")
     model: nn.Module = DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False) if distributed else compiled_model
 
     # Optimizer groups: matrix weights (Muon), tok_emb (Adam), scalars (Adam)
