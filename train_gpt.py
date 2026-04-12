@@ -225,8 +225,9 @@ def eval_elbo_bpb(
             # 8-point quadrature: NELBO nats for this batch = Σ_k (w_k/t_k) × sum(CE × mask_k)
             seq_elbo_nats = torch.zeros(bsz, device=device, dtype=torch.float64)
             for t_val, w_val in zip(T_EVAL, W_EVAL):
-                sigma_k = -torch.log(1.0 - t_val).expand(bsz)
-                mask_k = torch.rand(bsz, seq_len, device=device) < t_val
+                t_f = float(t_val)
+                sigma_k = torch.full((bsz,), -math.log(1.0 - t_f), device=device)
+                mask_k = torch.rand(bsz, seq_len, device=device) < t_f
                 xt = torch.where(mask_k, args.mask_id, x0)
 
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
