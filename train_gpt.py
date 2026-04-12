@@ -50,14 +50,14 @@ class Hyperparameters:
     train_seq_len = int(os.environ.get("TRAIN_SEQ_LEN", 1024))
     batch_size_per_gpu = int(os.environ.get("BATCH_SIZE_PER_GPU", 64))
     grad_accum_steps = int(os.environ.get("GRAD_ACCUM_STEPS", 1))
-    max_wallclock_seconds = float(os.environ.get("MAX_WALLCLOCK_SECONDS", 1080.0))
+    max_wallclock_seconds = float(os.environ.get("MAX_WALLCLOCK_SECONDS", 600.0))
 
     # Model shape.
     vocab_size = int(os.environ.get("VOCAB_SIZE", 1024))
     mask_id = vocab_size  # 1024
     total_vocab = vocab_size + 1  # 1025
     padded_vocab = int(os.environ.get("PADDED_VOCAB", 1088))  # multiple of 64 for efficiency
-    num_layers = int(os.environ.get("NUM_LAYERS", 9))
+    num_layers = int(os.environ.get("NUM_LAYERS", 8))
     model_dim = int(os.environ.get("MODEL_DIM", 512))
     num_heads = int(os.environ.get("NUM_HEADS", 8))
     num_kv_groups = int(os.environ.get("NUM_KV_GROUPS", 4))
