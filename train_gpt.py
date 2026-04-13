@@ -2,7 +2,7 @@
 MDLM for Parameter Golf. No AdaLN — implicit sigma via masked tokens.
 resid_mix + q_gain per block (from #1403), relu^2 MLP, 9L, fullgraph compile.
 Antithetic mask-fraction sampling for variance reduction.
-Run18: late-stage QAT (LR<0.40, ~480 steps), orthogonal init, Muon WD=0.01, full eval, GPTQ-lite, EMA=0.997.
+Run19: depth recurrence (loop encoder L1-L3 × 2 extra passes = 15/9 virtual layers) + QAT@0.40 + orthogonal + WD=0.01 + EMA + GPTQ-lite.
 """
 
 from __future__ import annotations
@@ -65,6 +65,10 @@ class Hyperparameters:
     rope_base = float(os.environ.get("ROPE_BASE", 10000.0))
     logit_softcap = float(os.environ.get("LOGIT_SOFTCAP", 30.0))
     num_unet_layers = int(os.environ.get("NUM_UNET_LAYERS", 3))
+    # Depth recurrence: loop encoder layers [recurrence_start, recurrence_end) extra times
+    recurrence_extra = int(os.environ.get("RECURRENCE_EXTRA", 2))   # extra passes (2 = 3 total)
+    recurrence_start = int(os.environ.get("RECURRENCE_START", 1))   # first layer to loop
+    recurrence_end = int(os.environ.get("RECURRENCE_END", 4))       # exclusive end (L1,L2,L3)
 
     # Optimizer hyperparameters.
     muon_lr = float(os.environ.get("MUON_LR", 0.04))
@@ -540,7 +544,7 @@ class DiffusionLM(nn.Module):
                     nn.init.orthogonal_(module.weight)  # orthogonal: better early convergence than Kaiming
 
     def _forward_blocks(self, xt: Tensor) -> Tensor:
-        """Shared encoder/decoder pass. Returns (B, L, dim) hidden states."""
+        """Shared encoder/decoder pass with depth recurrence. Returns (B, L, dim) hidden states."""
         B, L = xt.shape
         x = rms_norm(self.tok_emb(xt))
         x0 = x
@@ -552,6 +556,13 @@ class DiffusionLM(nn.Module):
         for i in range(self.num_encoder_layers):
             x = self.blocks[i](x, x0, cos, sin)
             skips[i] = x
+
+        # Depth recurrence: loop encoder layers [recurrence_start, recurrence_end) extra times
+        # Gives more effective depth without adding parameters (same artifact size)
+        args = self.args
+        for _ in range(args.recurrence_extra):
+            for i in range(args.recurrence_start, args.recurrence_end):
+                x = self.blocks[i](x, x0, cos, sin)
 
         # Decoder: add reversed encoder skips (last encoder → first decoder)
         for i in range(self.num_decoder_layers):
