@@ -2,7 +2,8 @@
 MDLM for Parameter Golf. No AdaLN — implicit sigma via masked tokens.
 resid_mix + q_gain per block (from #1403), relu^2 MLP, 9L, fullgraph compile.
 Antithetic mask-fraction sampling for variance reduction.
-Run20: depth recurrence L1-L3 x1 extra (12/9 virtual layers, ~8000 steps) — tune depth vs steps tradeoff vs Run19's x2.
+Run21: int6+brotli-11 quantization + WD=0.09 + mlp_mult=4 (larger model in same budget).
+Depth recurrence L1-L3 x1 extra (12/9 virtual layers).
 """
 
 from __future__ import annotations
@@ -18,6 +19,11 @@ import sys
 import time
 import uuid
 import zlib
+try:
+    import brotli as _brotli
+    _HAS_BROTLI = True
+except ImportError:
+    _HAS_BROTLI = False
 from pathlib import Path
 
 import numpy as np
@@ -109,6 +115,9 @@ INT8_KEEP_FLOAT_FP32_NAME_PATTERNS = CONTROL_TENSOR_NAME_PATTERNS
 INT8_KEEP_FLOAT_MAX_NUMEL = 65_536
 INT8_KEEP_FLOAT_STORE_DTYPE = torch.float16
 INT8_PER_ROW_SCALE_DTYPE = torch.float16
+# int6: store in int8 with range [-32, 31]; smaller value set → better brotli compression
+QUANT_MAX = 31        # int6 max (range [-32, 31])
+QUANT_MIN = -32       # int6 min
 INT8_CLIP_PERCENTILE = 99.99984
 INT8_CLIP_Q = INT8_CLIP_PERCENTILE / 100.0
 
@@ -127,7 +136,9 @@ def keep_float_tensor(name: str, t: Tensor, passthrough_orig_dtypes: dict[str, s
 
 
 def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor]:
-    """Per-row int8 quantization with GPTQ-lite: try 5 clip percentiles, keep min MSE."""
+    """Per-row int6 quantization with GPTQ-lite: try 5 clip percentiles, keep min MSE.
+    Values stored as int8 in range [QUANT_MIN, QUANT_MAX] = [-32, 31].
+    Smaller value range → better brotli-11 compression than int8's [-127, 127]."""
     t32 = t.float()
     if t32.ndim == 2:
         if not t32.numel():
@@ -138,15 +149,15 @@ def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor]:
         best_err = float("inf")
         for pct in [0.9990, 0.9995, 0.9999, 0.99999, 1.0]:
             clip_abs = torch.quantile(t32.abs(), pct, dim=1) if pct < 1.0 else t32.abs().amax(dim=1)
-            scale = (clip_abs / 127.0).clamp_min(1.0 / 127.0)
-            q = torch.clamp(torch.round(t32 / scale[:, None]), -127, 127).to(torch.int8)
+            scale = (clip_abs / QUANT_MAX).clamp_min(1.0 / QUANT_MAX)
+            q = torch.clamp(torch.round(t32 / scale[:, None]), QUANT_MIN, QUANT_MAX).to(torch.int8)
             err = (t32 - q.float() * scale[:, None]).pow(2).mean().item()
             if err < best_err:
                 best_q, best_scale, best_err = q, scale, err
         return best_q.contiguous(), best_scale.to(dtype=INT8_PER_ROW_SCALE_DTYPE).contiguous()  # type: ignore[union-attr]
     clip_abs = float(torch.quantile(t32.abs().flatten(), INT8_CLIP_Q).item()) if t32.numel() else 0.0
-    scale = torch.tensor(clip_abs / 127.0 if clip_abs > 0 else 1.0, dtype=torch.float32)
-    q = torch.clamp(torch.round(torch.clamp(t32, -clip_abs, clip_abs) / scale), -127, 127).to(torch.int8).contiguous()
+    scale = torch.tensor(clip_abs / QUANT_MAX if clip_abs > 0 else 1.0, dtype=torch.float32)
+    q = torch.clamp(torch.round(torch.clamp(t32, -clip_abs, clip_abs) / scale), QUANT_MIN, QUANT_MAX).to(torch.int8).contiguous()
     return q, scale
 
 
@@ -185,7 +196,7 @@ def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
         dtypes[name] = str(t.dtype).removeprefix("torch.")
         stats["int8_payload_bytes"] += tensor_nbytes(q) + tensor_nbytes(s)
     obj: dict[str, object] = {
-        "__quant_format__": "int8_clean_per_row_v1",
+        "__quant_format__": "int6_per_row_v1",
         "quantized": quantized, "scales": scales, "dtypes": dtypes, "passthrough": passthrough,
     }
     if qmeta:
@@ -430,10 +441,10 @@ class CastedLinear(nn.Linear):
     def forward(self, x: Tensor) -> Tensor:
         w = self.weight.to(x.dtype)
         if CastedLinear._qat_enabled and self.training and w.ndim == 2:
-            # STE: forward uses int8-quantized weights; gradient passes through identity
+            # STE: forward uses int6-quantized weights; gradient passes through identity
             w32 = self.weight.detach().float()
-            scale = (w32.abs().amax(dim=1) / 127.0).clamp_min(1.0 / 127.0)
-            w_q = (torch.clamp(torch.round(w32 / scale[:, None]), -127, 127) * scale[:, None]).to(x.dtype)
+            scale = (w32.abs().amax(dim=1) / QUANT_MAX).clamp_min(1.0 / QUANT_MAX)
+            w_q = (torch.clamp(torch.round(w32 / scale[:, None]), QUANT_MIN, QUANT_MAX) * scale[:, None]).to(x.dtype)
             w = w + (w_q - w).detach()  # STE: forward=w_q, backward=identity
         return F.linear(x, w)
 
@@ -976,24 +987,32 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save(quant_obj, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = zlib.compress(quant_raw, level=9)
+    if _HAS_BROTLI:
+        quant_blob = _brotli.compress(quant_raw, quality=11)
+        _compressor = "brotli-11"
+    else:
+        quant_blob = zlib.compress(quant_raw, level=9)
+        _compressor = "zlib-9"
     quant_raw_bytes = len(quant_raw)
     if master_process:
-        with open("final_model.int8.ptz", "wb") as f:
+        with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
-        quant_file_bytes = os.path.getsize("final_model.int8.ptz")
+        quant_file_bytes = os.path.getsize("final_model.int6.ptz")
         ratio = quant_stats["baseline_tensor_bytes"] / max(quant_stats["int8_payload_bytes"], 1)
         log0(
-            f"Serialized model int8+zlib: {quant_file_bytes} bytes "
+            f"Serialized model int6+{_compressor}: {quant_file_bytes} bytes "
             f"(payload:{quant_stats['int8_payload_bytes']} raw_torch:{quant_raw_bytes} payload_ratio:{ratio:.2f}x)"
         )
-        log0(f"Total submission size int8+zlib: {quant_file_bytes + code_bytes} bytes")
+        log0(f"Total submission size int6+{_compressor}: {quant_file_bytes + code_bytes} bytes")
 
     if distributed:
         dist.barrier()
-    with open("final_model.int8.ptz", "rb") as f:
+    with open("final_model.int6.ptz", "rb") as f:
         quant_blob_disk = f.read()
-    quant_state = torch.load(io.BytesIO(zlib.decompress(quant_blob_disk)), map_location="cpu")
+    if _HAS_BROTLI:
+        quant_state = torch.load(io.BytesIO(_brotli.decompress(quant_blob_disk)), map_location="cpu")
+    else:
+        quant_state = torch.load(io.BytesIO(zlib.decompress(quant_blob_disk)), map_location="cpu")
     base_model.load_state_dict(dequantize_state_dict_int8(quant_state), strict=True)
 
     saved_max_eval = args.max_eval_seqs
@@ -1007,10 +1026,10 @@ def main() -> None:
     )
     torch.cuda.synchronize()
     log0(
-        f"final_int8_zlib_roundtrip val_loss:{q_val_loss:.4f} val_bpb:{q_val_bpb:.4f} "
+        f"final_int6_brotli_roundtrip val_loss:{q_val_loss:.4f} val_bpb:{q_val_bpb:.4f} "
         f"eval_time:{1000.0 * (time.perf_counter() - t_qeval):.0f}ms"
     )
-    log0(f"final_int8_zlib_roundtrip_exact val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}")
+    log0(f"final_int6_brotli_roundtrip_exact val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}")
 
     if distributed:
         dist.destroy_process_group()
