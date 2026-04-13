@@ -2,7 +2,7 @@
 MDLM for Parameter Golf. No AdaLN — implicit sigma via masked tokens.
 resid_mix + q_gain per block (from #1403), relu^2 MLP, 9L, fullgraph compile.
 Antithetic mask-fraction sampling for variance reduction.
-Run19: depth recurrence (loop encoder L1-L3 × 2 extra passes = 15/9 virtual layers) + QAT@0.40 + orthogonal + WD=0.01 + EMA + GPTQ-lite.
+Run20: depth recurrence L1-L3 x1 extra (12/9 virtual layers, ~8000 steps) — tune depth vs steps tradeoff vs Run19's x2.
 """
 
 from __future__ import annotations
@@ -66,7 +66,7 @@ class Hyperparameters:
     logit_softcap = float(os.environ.get("LOGIT_SOFTCAP", 30.0))
     num_unet_layers = int(os.environ.get("NUM_UNET_LAYERS", 3))
     # Depth recurrence: loop encoder layers [recurrence_start, recurrence_end) extra times
-    recurrence_extra = int(os.environ.get("RECURRENCE_EXTRA", 2))   # extra passes (2 = 3 total)
+    recurrence_extra = int(os.environ.get("RECURRENCE_EXTRA", 1))   # extra passes (1 = 2 total)
     recurrence_start = int(os.environ.get("RECURRENCE_START", 1))   # first layer to loop
     recurrence_end = int(os.environ.get("RECURRENCE_END", 4))       # exclusive end (L1,L2,L3)
 

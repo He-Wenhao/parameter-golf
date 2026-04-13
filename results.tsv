@@ -27,3 +27,4 @@ e3e13c8	1.3694	9.5	15.80	discard	Run14b: PyTorch 2.6.0 enable_gqa=True (1.3519 p
 f7d21e3	1.3619	9.5	14.86	keep	Run16b: linear LR→0 + Muon WD=0.01 + EMA=0.997 + GPTQ-lite + noise_eps=0.05 + orthogonal init (1.3535 pre-quant; quant penalty 0.0084 vs 0.0154; new best!)
 46c48ae	1.3645	9.5	13.38	discard	Run17: Kaiming init + WD=0.02 + QAT@0.15 (181 steps) + full 100k eval (quant penalty ~0; WD=0.02 hurt pre-quant; worse than Run16b)
 e53e48b	1.3537	9.5	14.84	keep	Run18: QAT@0.40 (~480 steps) + orthogonal + WD=0.01 + EMA + GPTQ-lite + full 100k eval (1.3550 pre-quant; new best on fair full-eval basis)
+dabd787	1.3429	9.5	14.44	keep	Run19: depth recurrence L1-L3 x2 extra (15 virtual/9 physical, 92ms/step, 6537 steps) + QAT@0.40 + all Run18 improvements (1.3374 pre-quant; BEATS PR#1403; new best!)
