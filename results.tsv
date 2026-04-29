@@ -31,3 +31,4 @@ dabd787	1.3429	9.5	14.44	keep	Run19: depth recurrence L1-L3 x2 extra (15 virtual
 bdc85c6	1.3428	9.5	14.73	keep	Run20: depth recurrence L1-L3 x1 extra (12 virtual/9 physical, 86ms/step) (1.3379 pre-quant; ~tied with Run19 — fewer virtual layers compensated by more steps)
 101d839	1.4728	9.5	6.93	discard	Run21: int6+brotli-11 + WD=0.09 + mlp_mult=4 (26.5M params, 1.3786 pre-quant; int6 quant penalty 0.094 catastrophic without full Hessian GPTQ; over-compressed at 6.93MB)
 39b1444	1.3573	9.5	15.72	discard	Run22: 11L + int8+brotli-11 + WD=0.03 + mlp_mult=4 (1.3489 pre-quant; 5964 steps at 100.6ms/step; brotli-11 only saved 80B vs zlib-9 on int8 data; 11L+WD=0.03 worse than 9L Run20)
+39b1444	1.3465	9.5	14.51	discard	Run23: 9L + int8+brotli-11 + WD=0.03 + mlp_mult=4 (1.3515 step6925 sample; 6925 steps at 86.64ms/step; brotli saved ~290KB vs Run20's zlib but mlp=4+WD=0.03 still worse than Run20 9L mlp=2 WD=0.01 by 0.0037)
