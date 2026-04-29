@@ -2,9 +2,10 @@
 MDLM for Parameter Golf. No AdaLN — implicit sigma via masked tokens.
 resid_mix + q_gain per block (from #1403), relu^2 MLP, 9L, fullgraph compile.
 Antithetic mask-fraction sampling for variance reduction.
-Run31: Run 30 active learning + packed chunks_data (2D uint16) for fast vectorized fetch.
-Goal: cut Run 30's +22% step-time overhead by removing per-chunk numpy/torch loop.
-Warmup 2000 steps uniform → entropy * loss_ema sampling. Cap 10 samples/chunk. SEED=1337.
+Run33: Run 31 + cached cumulative CDF (refresh every K=20 steps).
+Cuts AL CPU work ~20x by amortizing cumsum over K steps. Goal: step time
+from 88ms back to ~75ms baseline → +1200 extra steps within 600s cap.
+Warmup 2000 steps uniform → entropy * loss_ema sampling. SEED=1337.
 """
 
 from __future__ import annotations
@@ -367,6 +368,9 @@ class ActiveSeqLoader:
         self.rng = np.random.default_rng(seed)
         self.step = 0
         self._micro_indices: list[np.ndarray] = []
+        self._refresh_K = int(os.environ.get("AL_REFRESH_K", 20))
+        self._cdf: np.ndarray | None = None
+        self._last_refresh_step = -1
 
     def reset(self) -> None:
         self.loss_ema[:] = 1.0
@@ -374,6 +378,8 @@ class ActiveSeqLoader:
         self.rng = np.random.default_rng(self._init_seed)
         self.step = 0
         self._micro_indices.clear()
+        self._cdf = None
+        self._last_refresh_step = -1
 
     def _compute_quality_packed(self, vocab_size: int) -> np.ndarray:
         scores = np.zeros(self.n_chunks, dtype=np.float32)
@@ -381,16 +387,27 @@ class ActiveSeqLoader:
             scores[i] = _chunk_entropy(self.chunks_data[i], vocab_size)
         return scores
 
-    def _sample_indices(self, n: int) -> np.ndarray:
-        if self.step < self.warmup_steps:
-            return self.rng.integers(0, self.n_chunks, size=n)
+    def _refresh_cdf(self) -> bool:
         valid = (self.sample_count < self.max_samples).astype(np.float32)
         weights = self.loss_ema * self.quality * valid
         total = float(weights.sum())
         if total <= 0.0 or not np.isfinite(total):
-            return self.rng.integers(0, self.n_chunks, size=n)
+            self._cdf = None
+            return False
         p = weights / total
-        return self.rng.choice(self.n_chunks, size=n, replace=True, p=p)
+        self._cdf = np.cumsum(p, dtype=np.float64)
+        return True
+
+    def _sample_indices(self, n: int) -> np.ndarray:
+        if self.step < self.warmup_steps:
+            return self.rng.integers(0, self.n_chunks, size=n)
+        if self._cdf is None or self.step - self._last_refresh_step >= self._refresh_K:
+            if self._refresh_cdf():
+                self._last_refresh_step = self.step
+        if self._cdf is None:
+            return self.rng.integers(0, self.n_chunks, size=n)
+        u = self.rng.random(n)
+        return np.searchsorted(self._cdf, u, side="right").clip(0, self.n_chunks - 1)
 
     def next_batch(self, batch_size_per_gpu: int, seq_len: int) -> Tensor:
         n_global = batch_size_per_gpu * self.world_size
