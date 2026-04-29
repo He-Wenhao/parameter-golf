@@ -2,8 +2,9 @@
 MDLM for Parameter Golf. No AdaLN — implicit sigma via masked tokens.
 resid_mix + q_gain per block (from #1403), relu^2 MLP, 9L, fullgraph compile.
 Antithetic mask-fraction sampling for variance reduction.
-Run26: int8+brotli-11 quantization + 9L + WD=0.01 + mlp_mult=2 + SEED=2.
-Variance check on Run 20's config — replicate at different seed to estimate noise floor.
+Run27: Run 20 config + 16-point midpoint ELBO eval + SEED=2.
+Tightens ELBO bound by extending t-range to full [0,1] and doubling integration density.
+Compare to Run 26 (same seed, 8-point trapezoidal eval = 1.3618) to isolate eval change.
 """
 
 from __future__ import annotations
@@ -362,10 +363,10 @@ def eval_elbo_bpb(
     has_leading_space_lut: Tensor,
     is_boundary_token_lut: Tensor,
 ) -> tuple[float, float]:
-    """8-point trapezoidal ELBO evaluation. No terminal KL needed for absorbing diffusion."""
-    _t = [0.05, 0.1, 0.2, 0.35, 0.5, 0.65, 0.8, 0.95]
-    _w = [(_t[1]-_t[0])/2, (_t[2]-_t[0])/2, (_t[3]-_t[1])/2, (_t[4]-_t[2])/2,
-          (_t[5]-_t[3])/2, (_t[6]-_t[4])/2, (_t[7]-_t[5])/2, (_t[7]-_t[6])/2]
+    """ELBO evaluation: midpoint rule with N_EVAL points on [0,1]. Tighter bound than 8-point trap."""
+    _N = int(os.environ.get("ELBO_TIMESTEPS", 16))
+    _t = [(i + 0.5) / _N for i in range(_N)]
+    _w = [1.0 / _N] * _N
     T_EVAL = torch.tensor(_t, device=device, dtype=torch.float32)
     W_EVAL = torch.tensor(_w, device=device, dtype=torch.float64)
 
