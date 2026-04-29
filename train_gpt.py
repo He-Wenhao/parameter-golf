@@ -2,9 +2,8 @@
 MDLM for Parameter Golf. No AdaLN — implicit sigma via masked tokens.
 resid_mix + q_gain per block (from #1403), relu^2 MLP, 9L, fullgraph compile.
 Antithetic mask-fraction sampling for variance reduction.
-Run27: Run 20 config + 16-point midpoint ELBO eval + SEED=2.
-Tightens ELBO bound by extending t-range to full [0,1] and doubling integration density.
-Compare to Run 26 (same seed, 8-point trapezoidal eval = 1.3618) to isolate eval change.
+Run28: Run 20 exact config + SEED=1337 + 8-pt eval (reverted) + brotli.
+Verify Run 20 (1.3428) reproducibility. If matches → seed=1337 lucky. If 1.36 → pod state shifted.
 """
 
 from __future__ import annotations
