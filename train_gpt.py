@@ -2,12 +2,12 @@
 MDLM for Parameter Golf. No AdaLN — implicit sigma via masked tokens.
 resid_mix + q_gain per block (from #1403), relu^2 MLP, 9L, fullgraph compile.
 Antithetic mask-fraction sampling for variance reduction.
-Run39: mlp_mult=2.5 + MUON_WD=0.03 + QAT_THRESHOLD=0.30 to fit Run36 config
-under 16MB. Run36 (mlp=2.5, WD=0.01, QAT=0.40) hit 1.3260 val_bpb but 16.43MB
-(over by 0.43MB). Need to shave 432KB. Stronger WD shrinks weights → lower
-int8 entropy → better brotli ratio. Earlier QAT (30% vs 40%) gives more steps
-to align weights to int8 grid. Run36 quant penalty was 0.0004 (essentially
-free) so extra QAT/WD shouldn't hurt much. Target: val_bpb ≤ 1.330 + ≤ 16.0MB.
+Run40: 8L mlp_mult=2.5 + AL+cache (Run 36 minus 1 layer). Run 39 confirmed
+mlp=2.5 gives best single-seed val_bpb (1.3249) but compression couldn't fit
+under 16MB (3.94x payload ratio is entropy floor, more WD/QAT didn't help).
+Drop 1 layer saves 2.36M params → ~700KB compressed → fits under 16MB easily.
+Total params ~18.9M (same as 9L mlp=2.0, Run 33's 1.3349). Tests whether
+beefier MLP per layer (mlp=2.5) beats more layers (mlp=2.0) under AL signal.
 """
 
 from __future__ import annotations
