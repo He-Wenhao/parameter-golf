@@ -2,9 +2,9 @@
 MDLM for Parameter Golf. No AdaLN — implicit sigma via masked tokens.
 resid_mix + q_gain per block (from #1403), relu^2 MLP, 9L, fullgraph compile.
 Antithetic mask-fraction sampling for variance reduction.
-Run33: Run 31 + cached cumulative CDF (refresh every K=20 steps).
-Cuts AL CPU work ~20x by amortizing cumsum over K steps. Goal: step time
-from 88ms back to ~75ms baseline → +1200 extra steps within 600s cap.
+Run36: Run 33 (AL+cache) + mlp_mult=2.5 (hidden 1024→1280, +25% MLP params).
+Test if extra capacity helps now that AL provides denser learning signal.
+Past capacity attempts (Runs 22-25 no AL) all hurt; AL changes the calculus.
 Warmup 2000 steps uniform → entropy * loss_ema sampling. SEED=1337.
 """
 
@@ -68,7 +68,7 @@ class Hyperparameters:
     model_dim = int(os.environ.get("MODEL_DIM", 512))
     num_heads = int(os.environ.get("NUM_HEADS", 8))
     num_kv_groups = int(os.environ.get("NUM_KV_GROUPS", 4))
-    mlp_mult = int(os.environ.get("MLP_MULT", 2))            # relu^2 hidden = dim * mlp_mult
+    mlp_mult = float(os.environ.get("MLP_MULT", 2))          # relu^2 hidden = dim * mlp_mult (float ok)
     qk_gain_init = float(os.environ.get("QK_GAIN_INIT", 1.5))
     rope_base = float(os.environ.get("ROPE_BASE", 10000.0))
     logit_softcap = float(os.environ.get("LOGIT_SOFTCAP", 30.0))
@@ -633,10 +633,10 @@ class BidirectionalAttention(nn.Module):
 
 class Block(nn.Module):
     """Transformer block with resid_mix, attn/mlp scale, relu^2 MLP. No AdaLN."""
-    def __init__(self, dim: int, num_heads: int, mlp_mult: int, num_kv_groups: int, qk_gain_init: float):
+    def __init__(self, dim: int, num_heads: int, mlp_mult: float, num_kv_groups: int, qk_gain_init: float):
         super().__init__()
         self.attn = BidirectionalAttention(dim, num_heads, num_kv_groups, qk_gain_init)
-        hidden = mlp_mult * dim
+        hidden = int(mlp_mult * dim)
         self.mlp_fc = CastedLinear(dim, hidden, bias=False)
         self.mlp_proj = CastedLinear(hidden, dim, bias=False)
         self.mlp_proj._zero_init = True
