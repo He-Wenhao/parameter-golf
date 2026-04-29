@@ -2,9 +2,9 @@
 MDLM for Parameter Golf. No AdaLN — implicit sigma via masked tokens.
 resid_mix + q_gain per block (from #1403), relu^2 MLP, 9L, fullgraph compile.
 Antithetic mask-fraction sampling for variance reduction.
-Run30: Active learning via ActiveSeqLoader (chunk-indexed, weighted by entropy * loss EMA).
+Run31: Run 30 active learning + packed chunks_data (2D uint16) for fast vectorized fetch.
+Goal: cut Run 30's +22% step-time overhead by removing per-chunk numpy/torch loop.
 Warmup 2000 steps uniform → entropy * loss_ema sampling. Cap 10 samples/chunk. SEED=1337.
-Goal: beat 4-seed mean 1.348 by improving sample efficiency on idle CPUs.
 """
 
 from __future__ import annotations
@@ -328,24 +328,29 @@ class ActiveSeqLoader:
         files = [Path(p) for p in sorted(glob.glob(pattern))]
         if not files:
             raise FileNotFoundError(f"No files found for pattern: {pattern}")
-        self.shards: list[Tensor] = [load_data_shard(f) for f in files]
 
-        shard_list: list[int] = []
-        off_list: list[int] = []
-        for s_idx, tokens in enumerate(self.shards):
-            n = tokens.numel() // seq_len
-            shard_list.extend([s_idx] * n)
-            off_list.extend((np.arange(n) * seq_len).tolist())
-        self.chunk_shard = np.array(shard_list, dtype=np.int32)
-        self.chunk_off = np.array(off_list, dtype=np.int64)
-        self.n_chunks = int(self.chunk_shard.size)
+        shards = [load_data_shard(f) for f in files]
+        chunks_per_shard = [t.numel() // seq_len for t in shards]
+        self.n_chunks = sum(chunks_per_shard)
+
+        # Pre-build packed chunks_data: shape (n_chunks, seq_len) uint16.
+        # Random-access fancy indexing is ~10x faster than per-chunk slice loop.
+        self.chunks_data = np.empty((self.n_chunks, seq_len), dtype=np.uint16)
+        cursor = 0
+        for tokens, n in zip(shards, chunks_per_shard):
+            usable = n * seq_len
+            self.chunks_data[cursor : cursor + n] = (
+                tokens[:usable].numpy().reshape(n, seq_len)
+            )
+            cursor += n
+        del shards  # free original 2GB
 
         if rank == 0:
             t_start = time.perf_counter()
-            self.quality = self._compute_quality(vocab_size)
+            self.quality = self._compute_quality_packed(vocab_size)
             t_el = time.perf_counter() - t_start
             print(
-                f"[ActiveSeqLoader] {self.n_chunks} chunks, entropy compute {t_el:.1f}s, "
+                f"[ActiveSeqLoader] {self.n_chunks} chunks, entropy {t_el:.1f}s, "
                 f"min={self.quality.min():.3f} mean={self.quality.mean():.3f} max={self.quality.max():.3f}",
                 flush=True,
             )
@@ -370,13 +375,10 @@ class ActiveSeqLoader:
         self.step = 0
         self._micro_indices.clear()
 
-    def _compute_quality(self, vocab_size: int) -> np.ndarray:
+    def _compute_quality_packed(self, vocab_size: int) -> np.ndarray:
         scores = np.zeros(self.n_chunks, dtype=np.float32)
         for i in range(self.n_chunks):
-            s = int(self.chunk_shard[i])
-            o = int(self.chunk_off[i])
-            tokens = self.shards[s][o : o + self.seq_len].numpy()
-            scores[i] = _chunk_entropy(tokens, vocab_size)
+            scores[i] = _chunk_entropy(self.chunks_data[i], vocab_size)
         return scores
 
     def _sample_indices(self, n: int) -> np.ndarray:
@@ -396,13 +398,13 @@ class ActiveSeqLoader:
         my_indices = global_indices[
             self.rank * batch_size_per_gpu : (self.rank + 1) * batch_size_per_gpu
         ]
-        batch = np.empty((batch_size_per_gpu, seq_len), dtype=np.int64)
-        for i, idx in enumerate(my_indices):
-            s = int(self.chunk_shard[idx])
-            o = int(self.chunk_off[idx])
-            batch[i] = self.shards[s][o : o + seq_len].numpy().astype(np.int64)
+        batch_uint16 = self.chunks_data[my_indices]  # vectorized fancy indexing
         self._micro_indices.append(global_indices)
-        return torch.from_numpy(batch).to(self.device, non_blocking=True)
+        return (
+            torch.from_numpy(batch_uint16)
+            .to(self.device, non_blocking=True)
+            .to(torch.int64)
+        )
 
     def update_loss(self, loss_value: float) -> None:
         for indices in self._micro_indices:
