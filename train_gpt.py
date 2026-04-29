@@ -2,8 +2,9 @@
 MDLM for Parameter Golf. No AdaLN — implicit sigma via masked tokens.
 resid_mix + q_gain per block (from #1403), relu^2 MLP, 9L, fullgraph compile.
 Antithetic mask-fraction sampling for variance reduction.
-Run29: Run 20 exact config + SEED=42 (third independent seed for variance triangulation).
-Run20 (SEED=1337)=1.3428, Run26 (SEED=2)=1.3618, Run28 (SEED=1337)=1.3387 → ±0.01 variance.
+Run30: Active learning via ActiveSeqLoader (chunk-indexed, weighted by entropy * loss EMA).
+Warmup 2000 steps uniform → entropy * loss_ema sampling. Cap 10 samples/chunk. SEED=1337.
+Goal: beat 4-seed mean 1.348 by improving sample efficiency on idle CPUs.
 """
 
 from __future__ import annotations
@@ -287,6 +288,130 @@ class DistributedSeqLoader:
         start = self.rank * rank_tokens
         local = chunk[start : start + rank_tokens].to(dtype=torch.int64)
         return local.reshape(batch_size, seq_len).to(self.device, non_blocking=True)
+
+
+def _chunk_entropy(tokens_np: np.ndarray, vocab_size: int) -> float:
+    counts = np.bincount(tokens_np, minlength=vocab_size).astype(np.float64)
+    total = counts.sum()
+    if total <= 0:
+        return 0.0
+    p = counts / total
+    nz = p > 0
+    return float(-np.sum(p[nz] * np.log(p[nz])))
+
+
+class ActiveSeqLoader:
+    """Active learning chunk-indexed sampler. Weighted by quality (entropy) * loss EMA."""
+
+    def __init__(
+        self,
+        pattern: str,
+        rank: int,
+        world_size: int,
+        device: torch.device,
+        seq_len: int,
+        vocab_size: int,
+        seed: int,
+        warmup_steps: int = 2000,
+        max_samples: int = 10,
+        ema_decay: float = 0.9,
+    ):
+        self.rank = rank
+        self.world_size = world_size
+        self.device = device
+        self.seq_len = seq_len
+        self.warmup_steps = warmup_steps
+        self.max_samples = max_samples
+        self.ema_decay = ema_decay
+        self._init_seed = seed
+
+        files = [Path(p) for p in sorted(glob.glob(pattern))]
+        if not files:
+            raise FileNotFoundError(f"No files found for pattern: {pattern}")
+        self.shards: list[Tensor] = [load_data_shard(f) for f in files]
+
+        shard_list: list[int] = []
+        off_list: list[int] = []
+        for s_idx, tokens in enumerate(self.shards):
+            n = tokens.numel() // seq_len
+            shard_list.extend([s_idx] * n)
+            off_list.extend((np.arange(n) * seq_len).tolist())
+        self.chunk_shard = np.array(shard_list, dtype=np.int32)
+        self.chunk_off = np.array(off_list, dtype=np.int64)
+        self.n_chunks = int(self.chunk_shard.size)
+
+        if rank == 0:
+            t_start = time.perf_counter()
+            self.quality = self._compute_quality(vocab_size)
+            t_el = time.perf_counter() - t_start
+            print(
+                f"[ActiveSeqLoader] {self.n_chunks} chunks, entropy compute {t_el:.1f}s, "
+                f"min={self.quality.min():.3f} mean={self.quality.mean():.3f} max={self.quality.max():.3f}",
+                flush=True,
+            )
+        else:
+            self.quality = np.zeros(self.n_chunks, dtype=np.float32)
+
+        if world_size > 1:
+            q_t = torch.from_numpy(self.quality).to(device)
+            dist.broadcast(q_t, src=0)
+            self.quality = q_t.cpu().numpy()
+
+        self.loss_ema = np.ones(self.n_chunks, dtype=np.float32)
+        self.sample_count = np.zeros(self.n_chunks, dtype=np.int32)
+        self.rng = np.random.default_rng(seed)
+        self.step = 0
+        self._micro_indices: list[np.ndarray] = []
+
+    def reset(self) -> None:
+        self.loss_ema[:] = 1.0
+        self.sample_count[:] = 0
+        self.rng = np.random.default_rng(self._init_seed)
+        self.step = 0
+        self._micro_indices.clear()
+
+    def _compute_quality(self, vocab_size: int) -> np.ndarray:
+        scores = np.zeros(self.n_chunks, dtype=np.float32)
+        for i in range(self.n_chunks):
+            s = int(self.chunk_shard[i])
+            o = int(self.chunk_off[i])
+            tokens = self.shards[s][o : o + self.seq_len].numpy()
+            scores[i] = _chunk_entropy(tokens, vocab_size)
+        return scores
+
+    def _sample_indices(self, n: int) -> np.ndarray:
+        if self.step < self.warmup_steps:
+            return self.rng.integers(0, self.n_chunks, size=n)
+        valid = (self.sample_count < self.max_samples).astype(np.float32)
+        weights = self.loss_ema * self.quality * valid
+        total = float(weights.sum())
+        if total <= 0.0 or not np.isfinite(total):
+            return self.rng.integers(0, self.n_chunks, size=n)
+        p = weights / total
+        return self.rng.choice(self.n_chunks, size=n, replace=True, p=p)
+
+    def next_batch(self, batch_size_per_gpu: int, seq_len: int) -> Tensor:
+        n_global = batch_size_per_gpu * self.world_size
+        global_indices = self._sample_indices(n_global)
+        my_indices = global_indices[
+            self.rank * batch_size_per_gpu : (self.rank + 1) * batch_size_per_gpu
+        ]
+        batch = np.empty((batch_size_per_gpu, seq_len), dtype=np.int64)
+        for i, idx in enumerate(my_indices):
+            s = int(self.chunk_shard[idx])
+            o = int(self.chunk_off[idx])
+            batch[i] = self.shards[s][o : o + seq_len].numpy().astype(np.int64)
+        self._micro_indices.append(global_indices)
+        return torch.from_numpy(batch).to(self.device, non_blocking=True)
+
+    def update_loss(self, loss_value: float) -> None:
+        for indices in self._micro_indices:
+            self.loss_ema[indices] = (
+                self.ema_decay * self.loss_ema[indices] + (1.0 - self.ema_decay) * loss_value
+            )
+            self.sample_count[indices] += 1
+        self._micro_indices.clear()
+        self.step += 1
 
 
 # -----------------------------
@@ -815,7 +940,17 @@ def main() -> None:
     optimizers = [optimizer_muon, optimizer_emb, optimizer_scalar]
     log0(f"optimizer: Muon({len(matrix_params)} matrices, wd={args.muon_weight_decay}) + Adam(emb+scalars, wd={args.adam_weight_decay})")
 
-    train_loader = DistributedSeqLoader(args.train_files, rank, world_size, device)
+    use_active_learning = int(os.environ.get("ACTIVE_LEARNING", 0)) == 1
+    if use_active_learning:
+        train_loader = ActiveSeqLoader(
+            args.train_files, rank, world_size, device,
+            seq_len=args.train_seq_len, vocab_size=args.vocab_size, seed=args.seed,
+            warmup_steps=int(os.environ.get("AL_WARMUP_STEPS", 2000)),
+            max_samples=int(os.environ.get("AL_MAX_SAMPLES", 10)),
+        )
+        log0(f"ActiveSeqLoader: {train_loader.n_chunks} chunks, warmup={train_loader.warmup_steps}, max_samples={train_loader.max_samples}")
+    else:
+        train_loader = DistributedSeqLoader(args.train_files, rank, world_size, device)
 
     def zero_grad_all() -> None:
         for opt in optimizers:
@@ -855,7 +990,10 @@ def main() -> None:
         for opt, state in zip(optimizers, saved_opts):
             opt.load_state_dict(state)
         zero_grad_all()
-        train_loader = DistributedSeqLoader(args.train_files, rank, world_size, device)
+        if use_active_learning:
+            train_loader.reset()
+        else:
+            train_loader = DistributedSeqLoader(args.train_files, rank, world_size, device)
 
     # EMA state: maintain running average of float32 model weights
     ema_state: dict[str, Tensor] = {}
@@ -919,6 +1057,9 @@ def main() -> None:
             train_loss += loss.detach() * grad_accum_steps
             loss.backward()
         train_loss /= grad_accum_steps
+
+        if use_active_learning:
+            train_loader.update_loss(float(train_loss.item()))
 
         if args.grad_clip_norm > 0:
             torch.nn.utils.clip_grad_norm_(base_model.parameters(), args.grad_clip_norm)
