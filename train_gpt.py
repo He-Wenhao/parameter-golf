@@ -2,8 +2,8 @@
 MDLM for Parameter Golf. No AdaLN — implicit sigma via masked tokens.
 resid_mix + q_gain per block (from #1403), relu^2 MLP, 9L, fullgraph compile.
 Antithetic mask-fraction sampling for variance reduction.
-Run24: int8+brotli-11 quantization + 9L + WD=0.01 + mlp_mult=2 + RECURRENCE_EXTRA=3.
-Depth recurrence L1-L3 x3 extra (18/9 virtual layers) — test recurrence saturation vs Run 19/20.
+Run25: int8+brotli-11 quantization + 10L + WD=0.01 + mlp_mult=2 + RECURRENCE_EXTRA=1.
+One extra physical layer using brotli's 1.5MB savings — does extra depth help under tighter step budget?
 """
 
 from __future__ import annotations
