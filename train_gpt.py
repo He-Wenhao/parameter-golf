@@ -2,9 +2,9 @@
 MDLM for Parameter Golf. No AdaLN — implicit sigma via masked tokens.
 resid_mix + q_gain per block (from #1403), relu^2 MLP, 9L, fullgraph compile.
 Antithetic mask-fraction sampling for variance reduction.
-Run36: Run 33 (AL+cache) + mlp_mult=2.5 (hidden 1024→1280, +25% MLP params).
-Test if extra capacity helps now that AL provides denser learning signal.
-Past capacity attempts (Runs 22-25 no AL) all hurt; AL changes the calculus.
+Run37: Run 33 (AL+cache) + mlp_mult=2.3 (hidden 1024→1177, +15% MLP params).
+Run 36 mlp=2.5 gave -0.0089 nats (val_bpb 1.3260) but artifact 16.43MB
+(over cap by 0.43MB). Back off to mlp=2.3 to fit under 16MB.
 Warmup 2000 steps uniform → entropy * loss_ema sampling. SEED=1337.
 """
 
