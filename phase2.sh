@@ -1,14 +1,14 @@
 #!/bin/bash
-# Phase 2: self-perplexity scoring + filtering + training.
-# Waits for queue.log to contain ALL DONE, then runs scoring and 3 ppl-based runs.
+# Phase 2 v2: starts after queue's FIRST-PASS DONE (skips queue's wasteful second pass).
+# Self-perplexity scoring + filtering + training.
 
 LOG=/workspace/phase2.log
 exec > "$LOG" 2>&1
-echo "[phase2] waiting for phase 1 ALL DONE..."
-until grep -q "ALL DONE ===" /workspace/queue.log 2>/dev/null; do
+echo "[phase2] waiting for FIRST-PASS DONE..."
+until grep -q "FIRST-PASS DONE ===" /workspace/queue.log 2>/dev/null; do
     sleep 30
 done
-echo "[phase2] phase 1 done at $(date), starting scoring"
+echo "[phase2] queue first pass done at $(date), starting scoring"
 
 cd /workspace/parameter-golf
 
