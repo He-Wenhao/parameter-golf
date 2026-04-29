@@ -2,8 +2,8 @@
 MDLM for Parameter Golf. No AdaLN — implicit sigma via masked tokens.
 resid_mix + q_gain per block (from #1403), relu^2 MLP, 9L, fullgraph compile.
 Antithetic mask-fraction sampling for variance reduction.
-Run28: Run 20 exact config + SEED=1337 + 8-pt eval (reverted) + brotli.
-Verify Run 20 (1.3428) reproducibility. If matches → seed=1337 lucky. If 1.36 → pod state shifted.
+Run29: Run 20 exact config + SEED=42 (third independent seed for variance triangulation).
+Run20 (SEED=1337)=1.3428, Run26 (SEED=2)=1.3618, Run28 (SEED=1337)=1.3387 → ±0.01 variance.
 """
 
 from __future__ import annotations
