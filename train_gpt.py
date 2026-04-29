@@ -2,12 +2,12 @@
 MDLM for Parameter Golf. No AdaLN — implicit sigma via masked tokens.
 resid_mix + q_gain per block (from #1403), relu^2 MLP, 9L, fullgraph compile.
 Antithetic mask-fraction sampling for variance reduction.
-Run40: 8L mlp_mult=2.5 + AL+cache (Run 36 minus 1 layer). Run 39 confirmed
-mlp=2.5 gives best single-seed val_bpb (1.3249) but compression couldn't fit
-under 16MB (3.94x payload ratio is entropy floor, more WD/QAT didn't help).
-Drop 1 layer saves 2.36M params → ~700KB compressed → fits under 16MB easily.
-Total params ~18.9M (same as 9L mlp=2.0, Run 33's 1.3349). Tests whether
-beefier MLP per layer (mlp=2.5) beats more layers (mlp=2.0) under AL signal.
+Run41: 9L mlp_mult=2.5 + NUM_KV_GROUPS=2 (GQA tightening). Run 40 confirmed
+8L worse than 9L (1.3361 vs Run 33's 1.3349) — layers > MLP width. Need to fit
+9L mlp=2.5 (Run 36's 1.3260 win) under 16MB via different param savings. GQA
+from 4→2 kv groups: K/V per layer (512,256)→(512,128), saves 128K per layer
+× 9 = 1.15M params → ~1MB compressed savings. Predicted artifact ~15.4MB.
+Predicted val_bpb 1.331-1.336 (Run 36's 1.3260 + 0.005-0.010 GQA penalty).
 """
 
 from __future__ import annotations
