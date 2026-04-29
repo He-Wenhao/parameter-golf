@@ -2,8 +2,8 @@
 MDLM for Parameter Golf. No AdaLN — implicit sigma via masked tokens.
 resid_mix + q_gain per block (from #1403), relu^2 MLP, 9L, fullgraph compile.
 Antithetic mask-fraction sampling for variance reduction.
-Run25: int8+brotli-11 quantization + 10L + WD=0.01 + mlp_mult=2 + RECURRENCE_EXTRA=1.
-One extra physical layer using brotli's 1.5MB savings — does extra depth help under tighter step budget?
+Run26: int8+brotli-11 quantization + 9L + WD=0.01 + mlp_mult=2 + SEED=2.
+Variance check on Run 20's config — replicate at different seed to estimate noise floor.
 """
 
 from __future__ import annotations
