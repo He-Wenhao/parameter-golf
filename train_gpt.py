@@ -2,12 +2,11 @@
 MDLM for Parameter Golf. No AdaLN — implicit sigma via masked tokens.
 resid_mix + q_gain per block (from #1403), relu^2 MLP, 9L, fullgraph compile.
 Antithetic mask-fraction sampling for variance reduction.
-Run41: 9L mlp_mult=2.5 + NUM_KV_GROUPS=2 (GQA tightening). Run 40 confirmed
-8L worse than 9L (1.3361 vs Run 33's 1.3349) — layers > MLP width. Need to fit
-9L mlp=2.5 (Run 36's 1.3260 win) under 16MB via different param savings. GQA
-from 4→2 kv groups: K/V per layer (512,256)→(512,128), saves 128K per layer
-× 9 = 1.15M params → ~1MB compressed savings. Predicted artifact ~15.4MB.
-Predicted val_bpb 1.331-1.336 (Run 36's 1.3260 + 0.005-0.010 GQA penalty).
+Run42: 9L mlp_mult=2.3 + AL+cache, SEED=2. Verify Run 37 (mlp=2.3, SEED=1337)
+achieved 1.3334 — was that seed luck? Run 41 confirmed GQA tightening doesn't
+help (still over cap + val_bpb cost). Pivot to verifying Run 37's reproducibility
+across seeds. If -0.0015 vs Run33 holds across SEED=2, estimate 3-seed mean ≈
+1.341 (Runs 33/34/35 mean 1.3428 - 0.0015). Marginally above 1.340 threshold.
 """
 
 from __future__ import annotations
